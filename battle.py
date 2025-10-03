@@ -1,20 +1,23 @@
 import os
+import asyncio
+from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+    Application, CommandHandler, CallbackQueryHandler,
+    ContextTypes
 )
-from flask import Flask, request
 
-# --- Flask setup (keeps Render process alive) ---
+# --- Environment ---
+TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN_HERE"
+RENDER_URL = os.getenv("RENDER_URL") or "https://tg-card-battle-bot.onrender.com"
+
+# --- Flask App ---
 app = Flask(__name__)
 
-# --- Telegram Bot setup ---
-TOKEN = os.environ.get("BOT_TOKEN")
-HEROKU_URL = os.environ.get("HEROKU_URL")  # e.g. https://your-app.onrender.com
-PORT = int(os.environ.get("PORT", 10000))
+# --- Telegram Bot Application ---
+application = Application.builder().token(TOKEN).build()
 
-application = ApplicationBuilder().token(TOKEN).build()
-
+# --- In-Memory Challenge Store ---
 challenges = {}
 
 # --- Handlers ---
@@ -25,52 +28,70 @@ async def battle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Please mention a user to challenge, e.g., /battle @username")
         return
+    
+    if not update.message.entities or not update.message.entities[0].user:
+        await update.message.reply_text("Could not find that user.")
+        return
 
     challenged_user = update.message.entities[0].user
     challenges[challenged_user.id] = update.effective_user.id
-
-    await update.message.reply_text(
-        f"{challenged_user.first_name}, you have been challenged by {update.effective_user.first_name}!"
-    )
-
+    
     keyboard = [
         [InlineKeyboardButton("Accept", callback_data=f"accept_{challenged_user.id}_{update.effective_user.id}")],
         [InlineKeyboardButton("Decline", callback_data=f"decline_{challenged_user.id}_{update.effective_user.id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"{challenged_user.first_name}, you have been challenged by {update.effective_user.first_name}!",
+        reply_markup=reply_markup
+    )
 
-    await update.message.reply_text("Do you accept the challenge?", reply_markup=reply_markup)
-
-# Simple accept/decline handler
-async def handle_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    data = query.data.split("_")
 
-    if query.data.startswith("accept"):
-        await query.edit_message_text("Challenge accepted! 🚀 (Battle logic coming soon)")
-    elif query.data.startswith("decline"):
+    action, challenged_id, challenger_id = data[0], int(data[1]), int(data[2])
+
+    if action == "accept":
+        await query.edit_message_text("Challenge accepted! Let the battle begin ⚔️")
+    else:
         await query.edit_message_text("Challenge declined ❌")
 
-# Register handlers
+# --- Register Handlers ---
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("battle", battle_command))
-application.add_handler(CallbackQueryHandler(handle_response))
+application.add_handler(CallbackQueryHandler(button_callback))
 
-# --- Flask route for Telegram webhook ---
+
+# --- Webhook Route ---
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
-def webhook():
+async def webhook() -> str:
     update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put_nowait(update)
-    return "ok", 200
+    await application.process_update(update)
+    return "ok"
 
-# Root route (for health checks)
-@app.route("/")
+
+# --- Health Check Route ---
+@app.route("/", methods=["GET"])
 def home():
-    return "Bot is running!", 200
+    return "Bot is running!"
+
+
+# --- Startup Hook ---
+async def set_webhook():
+    """Ensure webhook is set on startup"""
+    url = f"{RENDER_URL}/webhook/{TOKEN}"
+    await application.bot.set_webhook(url)
+    print(f"Webhook set to {url}")
+
+
+def main():
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(set_webhook())
+    # Flask runs under Gunicorn in production, so no need for app.run()
+
 
 if __name__ == "__main__":
-    # Set webhook
-    application.bot.set_webhook(f"{HEROKU_URL}/webhook/{TOKEN}")
-
-    # Run Flask server
-    app.run(host="0.0.0.0", port=PORT)
+    main()
