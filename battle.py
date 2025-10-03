@@ -82,11 +82,36 @@ async def battle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Please mention a user to challenge, e.g., /battle @username")
         return
+
+    # Get the challenged user
     challenged_user = update.message.entities[0].user
     challenges[challenged_user.id] = update.effective_user.id
-    await update.message.reply_text(f"{challenged_user.first_name}, you have been challenged by {update.effective_user.first_name}!")
+
+    # Announce the challenge
+    await update.message.reply_text(
+        f"{challenged_user.first_name}, you have been challenged by {update.effective_user.first_name}!"
+    )
+
+    # Create inline keyboard
     keyboard = [
-        [InlineKeyboardButton("Accept", callback_data=f"accept_{challenged_user.id}_{update.effective_user.id}")],
-        [InlineKeyboardButton("Decline", callback_data=f"decline_{challenged_user.id}_{update.effective_user.id}")]
+        [
+            InlineKeyboardButton(
+                "Accept",
+                callback_data=f"accept_{challenged_user.id}_{update.effective_user.id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "Decline",
+                callback_data=f"decline_{challenged_user.id}_{update.effective_user.id}"
+            )
+        ]
     ]
-    await
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # ✅ THIS was missing — you need to await sending the keyboard
+    await update.message.reply_text(
+        "Do you accept the challenge?",
+        reply_markup=reply_markup
+    )
+
