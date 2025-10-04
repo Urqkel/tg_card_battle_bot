@@ -1,8 +1,9 @@
 import os
 import json
-from flask import Flask, request
+import asyncio
+from quart import Quart, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 STORAGE_FILE = "cards.json"
@@ -19,7 +20,7 @@ def save_cards():
         json.dump(cards_db, f)
 
 # --- In-memory challenges ---
-challenges = {}  # {challenged_id: challenger_id}
+challenges = {}  # {challenged_id: {"challenger_id": int, "challenger_card": str}}
 
 # --- Battle Logic ---
 def battle(card1, card2):
@@ -37,60 +38,71 @@ def battle(card1, card2):
     elif eff2 > eff1:
         return 2
     else:
-        return 0  # Tie
+        return 0
 
-# --- Telegram Bot Handlers ---
+# --- Telegram Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Welcome to Card Battle!\n"
-        "Use /upload to upload your card.\n"
-        "Use /battle @username to challenge someone."
+        "Upload cards with /upload <card_name>\n"
+        "Battle others with /battle @username <your_card_name>"
     )
 
 async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /upload <card_name>")
+        return
+
+    card_name = context.args[0]
     user_id = str(update.effective_user.id)
-    # Example: hard-coded card (replace with real upload flow if needed)
     card = {
         "power": 10,
         "defense": 5,
         "rarity": "Rare",
         "ability": "Double Power",
-        "tagline": "My first card!"
+        "tagline": f"{card_name} card!"
     }
-    cards_db[user_id] = card
+    if user_id not in cards_db:
+        cards_db[user_id] = {}
+    cards_db[user_id][card_name] = card
     save_cards()
-    await update.message.reply_text("Your card has been uploaded!")
+    await update.message.reply_text(f"Card '{card_name}' uploaded!")
 
 async def battle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Mention a user to challenge, e.g., /battle @username")
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /battle @username <your_card_name>")
         return
 
-    if not update.message.entities:
-        await update.message.reply_text("Please mention a valid username.")
+    entities = update.message.entities
+    if not entities or entities[0].type != "mention":
+        await update.message.reply_text("Please mention a valid user.")
         return
 
-    challenged_user = update.message.entities[0].user
-    if not challenged_user:
-        await update.message.reply_text("Could not resolve username.")
+    challenged_user = entities[0].user
+    challenger_card_name = context.args[1]
+    challenger_id = update.effective_user.id
+    challenged_id = challenged_user.id
+
+    user_cards = cards_db.get(str(challenger_id), {})
+    if challenger_card_name not in user_cards:
+        await update.message.reply_text(f"You don't have a card named '{challenger_card_name}'")
         return
 
-    # Store challenge
-    challenges[challenged_user.id] = update.effective_user.id
+    challenges[challenged_id] = {"challenger_id": challenger_id, "challenger_card": challenger_card_name}
+
+    # Let challenged pick a card
+    challenged_cards = cards_db.get(str(challenged_id), {})
+    if not challenged_cards:
+        await update.message.reply_text("The challenged user has no cards uploaded.")
+        return
 
     keyboard = [
-        [
-            InlineKeyboardButton(
-                "Accept", callback_data=f"accept_{challenged_user.id}_{update.effective_user.id}"
-            ),
-            InlineKeyboardButton(
-                "Decline", callback_data=f"decline_{challenged_user.id}_{update.effective_user.id}"
-            )
-        ]
+        [InlineKeyboardButton(name, callback_data=f"pick_{challenged_id}_{challenger_id}_{name}")]
+        for name in challenged_cards.keys()
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        f"{challenged_user.first_name}, you have been challenged by {update.effective_user.first_name}!",
+        f"{challenged_user.first_name}, choose a card to battle!",
         reply_markup=reply_markup
     )
 
@@ -98,19 +110,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data.split("_")
-    action, challenged_id, challenger_id = data[0], int(data[1]), int(data[2])
-
-    if action == "decline":
-        await query.edit_message_text("Challenge declined.")
-        challenges.pop(challenged_id, None)
+    if data[0] != "pick":
         return
 
-    # Accepted
-    challenger_card = cards_db.get(str(challenger_id))
-    challenged_card = cards_db.get(str(challenged_id))
-    if not challenger_card or not challenged_card:
-        await query.edit_message_text("One of the players has no card uploaded.")
-        return
+    challenged_id = int(data[1])
+    challenger_id = int(data[2])
+    challenged_card_name = data[3]
+
+    # Retrieve cards
+    challenger_card_name = challenges.get(challenged_id)["challenger_card"]
+    challenger_card = cards_db[str(challenger_id)][challenger_card_name]
+    challenged_card = cards_db[str(challenged_id)][challenged_card_name]
 
     winner = battle(challenger_card, challenged_card)
     if winner == 1:
@@ -130,22 +140,24 @@ application.add_handler(CommandHandler("upload", upload))
 application.add_handler(CommandHandler("battle", battle_command))
 application.add_handler(CallbackQueryHandler(button_handler))
 
-# --- Flask Webhook ---
-from flask import Flask, request
-
-app = Flask(__name__)
+# --- Quart App for Webhook ---
+app = Quart(__name__)
 
 @app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    data = request.get_json(force=True)
+async def webhook():
+    data = await request.get_json(force=True)
     update = Update.de_json(data, application.bot)
-    application.create_task(application.process_update(update))
+    await application.process_update(update)
     return "ok"
 
 @app.route("/", methods=["GET"])
-def index():
+async def index():
     return "Bot is running!"
 
-# --- Run for local testing ---
+# --- Run locally ---
 if __name__ == "__main__":
-    app.run(port=int(os.environ.get("PORT", 5000)))
+    import hypercorn.asyncio
+    import hypercorn.config
+    config = hypercorn.config.Config()
+    config.bind = [f"0.0.0.0:{os.environ.get('PORT', 5000)}"]
+    asyncio.run(hypercorn.asyncio.serve(app, config))
