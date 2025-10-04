@@ -1,16 +1,18 @@
-from flask import Flask, request, send_file
-import imageio, base64, io
+import imageio
+import os
 
-app = Flask(__name__)
-
-@app.route("/create_gif", methods=["POST"])
-def create_gif():
-    data = request.json
-    frames = [imageio.imread(io.BytesIO(base64.b64decode(f.split(",")[1]))) for f in data["frames"]]
-    gif_bytes = io.BytesIO()
-    imageio.mimsave(gif_bytes, frames, format='GIF', duration=0.5)
-    gif_bytes.seek(0)
-    return send_file(gif_bytes, mimetype="image/gif", download_name="battle.gif")
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+def start_battle(player1, player2):
+    """
+    Simplified battle logic:
+    - Pick card images from static/cards/
+    - Generate GIF showing the fight
+    """
+    # Example: load images
+    frames = []
+    path1 = f"static/cards/{player1}.png"
+    path2 = f"static/cards/{player2}.png"
+    for frame in [path1, path2, path1]:
+        frames.append(imageio.imread(frame))
+    gif_path = f"static/battle_{player1}_vs_{player2}.gif"
+    imageio.mimsave(gif_path, frames, duration=0.5)
+    return gif_path
