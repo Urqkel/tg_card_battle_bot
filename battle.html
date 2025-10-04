@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Card Battle</title>
+<style>
+  body { background:#222; color:#fff; font-family:sans-serif; text-align:center; }
+  canvas { background:#111; margin:20px auto; display:block; border:2px solid #fff; }
+</style>
+</head>
+<body>
+<h1>Card Battle</h1>
+<canvas id="battleCanvas" width="600" height="400"></canvas>
+<script>
+const urlParams = new URLSearchParams(window.location.search);
+const p1 = urlParams.get('p1'), p2 = urlParams.get('p2');
+
+// Simulate cards
+let player1 = { name: "Player1", hp: 100, power: 20 };
+let player2 = { name: "Player2", hp: 100, power: 18 };
+
+const canvas = document.getElementById("battleCanvas");
+const ctx = canvas.getContext("2d");
+let frames = [];
+
+function drawBattle() {
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle="red"; ctx.fillRect(100,200,player1.hp*2,20);
+  ctx.fillStyle="blue"; ctx.fillRect(400,200,player2.hp*2,20);
+  ctx.fillStyle="white"; ctx.font="20px Arial";
+  ctx.fillText(player1.name,100,180); ctx.fillText(player2.name,400,180);
+}
+
+async function battle() {
+  drawBattle();
+  while(player1.hp>0 && player2.hp>0){
+    await new Promise(r=>setTimeout(r,500));
+    player2.hp -= Math.floor(Math.random()*player1.power);
+    drawBattle(); frames.push(canvas.toDataURL("image/png"));
+    if(player2.hp<=0) break;
+    player1.hp -= Math.floor(Math.random()*player2.power);
+    drawBattle(); frames.push(canvas.toDataURL("image/png"));
+  }
+  // Send frames to server
+  await fetch("/create_gif", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({frames})
+  });
+}
+
+battle();
+</script>
+</body>
+</html>
