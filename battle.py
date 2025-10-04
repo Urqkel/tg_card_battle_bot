@@ -1,139 +1,151 @@
 import os
-import random
 import json
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
 
-TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN_HERE"
-RENDER_URL = os.getenv("RENDER_URL") or "https://tg-card-battle-bot.onrender.com"
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+STORAGE_FILE = "cards.json"
 
-app = Flask(__name__)
-application = Application.builder().token(TOKEN).build()
+# --- Load/Save cards ---
+if os.path.exists(STORAGE_FILE):
+    with open(STORAGE_FILE, "r") as f:
+        cards_db = json.load(f)
+else:
+    cards_db = {}
 
-# --- Storage ---
-players_cards = {}   # player_id -> card dict
-challenges = {}
+def save_cards():
+    with open(STORAGE_FILE, "w") as f:
+        json.dump(cards_db, f)
 
-# --- Rarity multipliers ---
-RARITY_MULTIPLIERS = {
-    "Common": 1.0,
-    "Rare": 1.05,
-    "Ultra-Rare": 1.1,
-    "Legendary": 1.2
-}
+# --- In-memory challenges ---
+challenges = {}  # {challenged_id: challenger_id}
 
-# --- Battle logic ---
-def calculate_score(card, opponent_card):
-    rarity_bonus = RARITY_MULTIPLIERS.get(card["rarity"], 1.0) * card["power"]
-    attack_score = card["power"] + random.randint(0, 20) + rarity_bonus
-    defense_score = card["defense"] + random.randint(0, 10)
+# --- Battle Logic ---
+def battle(card1, card2):
+    rarity_bonus = {"Common": 0, "Rare": 5, "Ultra-Rare": 10, "Legendary": 20}
+    eff1 = card1["power"] + rarity_bonus.get(card1["rarity"], 0) - card2["defense"]
+    eff2 = card2["power"] + rarity_bonus.get(card2["rarity"], 0) - card1["defense"]
 
-    # Special abilities
-    if card["special"] == "Double Strike":
-        attack_score += 10
-    if card["special"] == "Shield Break":
-        defense_score = defense_score / 2
-    if card["special"] == "Critical Hit":
-        attack_score += random.randint(10, 30)
+    if card1.get("ability") == "Double Power":
+        eff1 *= 2
+    if card2.get("ability") == "Double Power":
+        eff2 *= 2
 
-    final_score = attack_score - (defense_score / 2)
-    return final_score
+    if eff1 > eff2:
+        return 1
+    elif eff2 > eff1:
+        return 2
+    else:
+        return 0  # Tie
 
-# --- Handlers ---
+# --- Telegram Bot Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Welcome to Card Battle! Use /battle @username to challenge someone."
+        "Welcome to Card Battle!\n"
+        "Use /upload to upload your card.\n"
+        "Use /battle @username to challenge someone."
     )
 
+async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    # Example: hard-coded card (replace with real upload flow if needed)
+    card = {
+        "power": 10,
+        "defense": 5,
+        "rarity": "Rare",
+        "ability": "Double Power",
+        "tagline": "My first card!"
+    }
+    cards_db[user_id] = card
+    save_cards()
+    await update.message.reply_text("Your card has been uploaded!")
+
 async def battle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args or not update.message.entities:
-        await update.message.reply_text("Please mention a user to challenge, e.g., /battle @username")
+    if not context.args:
+        await update.message.reply_text("Mention a user to challenge, e.g., /battle @username")
+        return
+
+    if not update.message.entities:
+        await update.message.reply_text("Please mention a valid username.")
         return
 
     challenged_user = update.message.entities[0].user
-    challenger_id = update.effective_user.id
-
-    # Check cards
-    if challenger_id not in players_cards:
-        await update.message.reply_text("You haven't uploaded a card yet! Upload one first.")
-        return
-    if challenged_user.id not in players_cards:
-        await update.message.reply_text(f"{challenged_user.first_name} hasn't uploaded a card yet!")
+    if not challenged_user:
+        await update.message.reply_text("Could not resolve username.")
         return
 
-    challenges[challenged_user.id] = challenger_id
+    # Store challenge
+    challenges[challenged_user.id] = update.effective_user.id
+
     keyboard = [
         [
-            InlineKeyboardButton("Accept", callback_data=f"accept_{challenged_user.id}_{challenger_id}"),
-            InlineKeyboardButton("Decline", callback_data=f"decline_{challenged_user.id}_{challenger_id}")
+            InlineKeyboardButton(
+                "Accept", callback_data=f"accept_{challenged_user.id}_{update.effective_user.id}"
+            ),
+            InlineKeyboardButton(
+                "Decline", callback_data=f"decline_{challenged_user.id}_{update.effective_user.id}"
+            )
         ]
     ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
         f"{challenged_user.first_name}, you have been challenged by {update.effective_user.first_name}!",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=reply_markup
     )
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    action, challenged_id, challenger_id = query.data.split("_")[0], int(query.data.split("_")[1]), int(query.data.split("_")[2])
+    data = query.data.split("_")
+    action, challenged_id, challenger_id = data[0], int(data[1]), int(data[2])
 
-    challenger_card = players_cards[challenger_id]
-    challenged_card = players_cards[challenged_id]
+    if action == "decline":
+        await query.edit_message_text("Challenge declined.")
+        challenges.pop(challenged_id, None)
+        return
 
-    if action == "accept":
-        score1 = calculate_score(challenger_card, challenged_card)
-        score2 = calculate_score(challenged_card, challenger_card)
+    # Accepted
+    challenger_card = cards_db.get(str(challenger_id))
+    challenged_card = cards_db.get(str(challenged_id))
+    if not challenger_card or not challenged_card:
+        await query.edit_message_text("One of the players has no card uploaded.")
+        return
 
-        if score1 > score2:
-            result = f"🏆 {context.bot.get_chat(challenger_id).first_name} wins!"
-        elif score2 > score1:
-            result = f"🏆 {context.bot.get_chat(challenged_id).first_name} wins!"
-        else:
-            result = "🤝 It's a tie!"
-
-        # Send battle summary
-        await context.bot.send_photo(
-            chat_id=query.message.chat_id,
-            photo=challenger_card["image_id"],
-            caption=f"{context.bot.get_chat(challenger_id).first_name}'s Card\nPower: {challenger_card['power']}\nDefense: {challenger_card['defense']}\nRarity: {challenger_card['rarity']}\nSpecial: {challenger_card['special']}\nTagline: {challenger_card['tagline']}"
-        )
-        await context.bot.send_photo(
-            chat_id=query.message.chat_id,
-            photo=challenged_card["image_id"],
-            caption=f"{context.bot.get_chat(challenged_id).first_name}'s Card\nPower: {challenged_card['power']}\nDefense: {challenged_card['defense']}\nRarity: {challenged_card['rarity']}\nSpecial: {challenged_card['special']}\nTagline: {challenged_card['tagline']}\n\n{result}"
-        )
-        del challenges[challenged_id]
+    winner = battle(challenger_card, challenged_card)
+    if winner == 1:
+        msg = f"{context.bot.get_chat(challenger_id).first_name} wins!"
+    elif winner == 2:
+        msg = f"{context.bot.get_chat(challenged_id).first_name} wins!"
     else:
-        await query.edit_message_text("Challenge declined ❌")
-        del challenges[challenged_id]
+        msg = "It's a tie!"
 
-# --- Register handlers ---
+    await query.edit_message_text(msg)
+    challenges.pop(challenged_id, None)
+
+# --- Telegram Application ---
+application = ApplicationBuilder().token(BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("upload", upload))
 application.add_handler(CommandHandler("battle", battle_command))
-application.add_handler(CallbackQueryHandler(button_callback))
+application.add_handler(CallbackQueryHandler(button_handler))
 
-# --- Webhook route ---
-@app.route(f"/webhook/{TOKEN}", methods=["POST"])
+# --- Flask Webhook ---
+from flask import Flask, request
+
+app = Flask(__name__)
+
+@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     data = request.get_json(force=True)
-    print("Incoming update:", json.dumps(data))  # <-- DEBUG log
     update = Update.de_json(data, application.bot)
     application.create_task(application.process_update(update))
     return "ok"
 
-# --- Health check ---
 @app.route("/", methods=["GET"])
-def home():
+def index():
     return "Bot is running!"
 
-# --- Set webhook at startup ---
-async def set_webhook():
-    url = f"{RENDER_URL}/webhook/{TOKEN}"
-    await application.bot.set_webhook(url)
-    print(f"Webhook set to {url}")
-
+# --- Run for local testing ---
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(set_webhook())
+    app.run(port=int(os.environ.get("PORT", 5000)))
