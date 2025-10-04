@@ -1,5 +1,5 @@
 import os
-import asyncio
+import random
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -13,10 +13,10 @@ RENDER_URL = os.getenv("RENDER_URL") or "https://tg-card-battle-bot.onrender.com
 # --- Flask App ---
 app = Flask(__name__)
 
-# --- Telegram Application ---
+# --- Telegram Bot Application ---
 application = Application.builder().token(TOKEN).build()
 
-# --- In-memory challenges storage ---
+# --- In-memory challenge storage ---
 challenges = {}
 
 # --- Handlers ---
@@ -27,9 +27,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def battle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            "Please mention a user to challenge, e.g., /battle @username"
-        )
+        await update.message.reply_text("Please mention a user to challenge, e.g., /battle @username")
         return
 
     if not update.message.entities or not update.message.entities[0].user:
@@ -43,12 +41,10 @@ async def battle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton(
                 "Accept", callback_data=f"accept_{challenged_user.id}_{update.effective_user.id}"
-            )
-        ],
-        [
+            ),
             InlineKeyboardButton(
                 "Decline", callback_data=f"decline_{challenged_user.id}_{update.effective_user.id}"
-            )
+            ),
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -66,11 +62,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action, challenged_id, challenger_id = data[0], int(data[1]), int(data[2])
 
     if action == "accept":
-        await query.edit_message_text("Challenge accepted! ⚔️ (Battle logic coming soon)")
+        # Minimal test battle (replace later with real card stats)
+        player1_power = random.randint(50, 100)
+        player2_power = random.randint(50, 100)
+        if player1_power > player2_power:
+            result = f"Challenger wins! ({player1_power} vs {player2_power})"
+        elif player2_power > player1_power:
+            result = f"Challenged wins! ({player2_power} vs {player1_power})"
+        else:
+            result = f"It's a tie! ({player1_power} vs {player2_power})"
+
+        await query.edit_message_text(f"Challenge accepted! ⚔️\n{result}")
     else:
         await query.edit_message_text("Challenge declined ❌")
 
-# --- Register Handlers ---
+# --- Register handlers ---
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("battle", battle_command))
 application.add_handler(CallbackQueryHandler(button_callback))
@@ -93,10 +99,13 @@ async def set_webhook():
     await application.bot.set_webhook(url)
     print(f"Webhook set to {url}")
 
+# --- Main entry point ---
 def main():
+    import asyncio
     loop = asyncio.get_event_loop()
     loop.run_until_complete(set_webhook())
-    # Flask will be run by Gunicorn in production
+    # Hypercorn runs Flask app in production
+    print("Bot is ready to receive webhooks.")
 
 if __name__ == "__main__":
     main()
