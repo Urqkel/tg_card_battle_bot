@@ -1,0 +1,4 @@
+python-telegram-bot==20.3
+Flask==2.3.3
+imageio==2.30.1
+Pillow==10.1.0
