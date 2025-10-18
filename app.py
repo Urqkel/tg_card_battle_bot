@@ -1,17 +1,25 @@
+import io
 import os
-from fastapi import FastAPI, Request, UploadFile, File
-from fastapi.responses import JSONResponse
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
 import random
+import re
+from PIL import Image, ImageDraw, ImageFont
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from telegram import Update, InputFile
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+import pytesseract
 
-# --- Config ---
+# =====================
+# Config
+# =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8000))
 
-if not BOT_TOKEN or not RENDER_EXTERNAL_URL:
-    raise RuntimeError("BOT_TOKEN or RENDER_EXTERNAL_URL missing.")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN not found in environment.")
+if not RENDER_EXTERNAL_URL:
+    raise RuntimeError("RENDER_EXTERNAL_URL not found in environment.")
 
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
@@ -19,120 +27,199 @@ WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
 app = FastAPI()
 telegram_app: Application = None
 
-# --- In-memory storage ---
-pending_challenges = {}  # chat_id -> {challenger_id, challenged_username, cards}
+# =====================
+# Storage
+# =====================
+pending_battles = {}
+active_battles = {}
 
-# --- Helper functions ---
-def calculate_hp(card):
-    # Determine rarity factor
-    rarity_map = {
-        "Legendary": 4,
-        "Ultra-Rare": 3,
-        "Rare": 2,
-        "Common": 1
+# =====================
+# OCR + Stat Extraction
+# =====================
+def extract_card_stats(image_path):
+    """Extract power, defense, rarity, and serial number from a card"""
+    text = pytesseract.image_to_string(Image.open(image_path)).lower()
+
+    power = defense = 50
+    rarity = "common"
+    serial = 1500
+
+    power_match = re.search(r"power[:\s]*([0-9]+)", text)
+    defense_match = re.search(r"defense[:\s]*([0-9]+)", text)
+    rarity_match = re.search(r"(common|rare|ultra[-\s]?rare|legendary)", text)
+    serial_match = re.search(r"#?(\d{1,4})", text)
+
+    if power_match:
+        power = int(power_match.group(1))
+    if defense_match:
+        defense = int(defense_match.group(1))
+    if rarity_match:
+        rarity = rarity_match.group(1).replace("-", "").replace(" ", "")
+    if serial_match:
+        serial = int(serial_match.group(1))
+
+    return {"power": power, "defense": defense, "rarity": rarity, "serial": serial}
+
+
+# =====================
+# HP Calculation
+# =====================
+def calculate_hp(stats):
+    rarity_hp = {
+        "common": 100,
+        "rare": 200,
+        "ultrarare": 300,
+        "legendary": 400
     }
-    rarity_factor = rarity_map.get(card.get("rarity"), 1)
+    base_hp = rarity_hp.get(stats["rarity"], 100)
+    serial_bonus = max(0, 2000 - stats["serial"]) / 10
+    total_hp = base_hp + serial_bonus + (stats["power"] * 0.5) + (stats["defense"] * 0.3)
+    return int(total_hp)
 
-    # Lower serial = more exclusive, give bonus
-    serial_bonus = max(0, 2000 - int(card.get("serial_number", 1000))) / 500
 
-    # Power & defense stats
-    power = int(card.get("power", 10))
-    defense = int(card.get("defense", 10))
+# =====================
+# Battle Animation
+# =====================
+def generate_battle_gif(card1_path, card2_path, winner_name):
+    """Create a short local battle animation"""
+    card1 = Image.open(card1_path).resize((350, 500))
+    card2 = Image.open(card2_path).resize((350, 500))
+    width, height = 900, 550
+    bg_color = (25, 25, 40)
+    frames = []
 
-    hp = (power + defense) * rarity_factor + serial_bonus
-    return hp
+    for i in range(10):
+        frame = Image.new("RGB", (width, height), bg_color)
+        x1 = 50 + i * 15
+        x2 = width - 400 - i * 15
+        frame.paste(card1, (x1, 25))
+        frame.paste(card2, (x2, 25))
+        frames.append(frame)
 
-def determine_winner(card1, card2):
-    hp1 = calculate_hp(card1)
-    hp2 = calculate_hp(card2)
-    if hp1 > hp2:
-        return card1
-    elif hp2 > hp1:
-        return card2
-    else:
-        # tie-breaker random
-        return random.choice([card1, card2])
+    flash = Image.new("RGB", (width, height), (255, 255, 255))
+    frames.append(flash)
 
-# --- Handlers ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Welcome to the Card Battle Arena!\n"
-        "Use /challenge @username to start a battle."
-    )
-
-async def challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ Usage: /challenge @username")
-        return
-
-    challenged_username = context.args[0].lstrip("@")
-    challenger = update.message.from_user
-    chat_id = update.effective_chat.id
-
-    pending_challenges[chat_id] = {
-        "challenger": {"id": challenger.id, "username": challenger.username},
-        "challenged": {"username": challenged_username},
-        "cards": {}
-    }
-
-    await update.message.reply_text(
-        f"⚔️ @{challenger.username} has challenged @{challenged_username}!\n"
-        "Both players, please upload your cards to start the battle."
-    )
-
-async def upload_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if chat_id not in pending_challenges:
-        await update.message.reply_text("⚠️ No active challenge. Start with /challenge @username")
-        return
-
-    user = update.message.from_user
-    if not update.message.photo:
-        await update.message.reply_text("⚠️ Please upload an image of your card.")
-        return
-
-    # Download the image
-    file = await update.message.photo[-1].get_file()
-    file_path = f"/tmp/{user.id}_card.jpg"
-    await file.download_to_drive(file_path)
-
-    # --- OCR / Metadata Extraction ---
-    # Use your existing function from the card generator bot
+    final = frames[-1].copy()
+    draw = ImageDraw.Draw(final)
     try:
-        card_stats = extract_card_stats(file_path)
-        # Expected output: dict with keys: name, power, defense, rarity, serial_number
-        card_stats["username"] = user.username
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Failed to extract card stats: {str(e)}")
+        font = ImageFont.truetype("arial.ttf", 40)
+    except:
+        font = ImageFont.load_default()
+    draw.text(
+        (width // 2 - 180, height - 80),
+        f"🏆 {winner_name} Wins!",
+        fill=(255, 215, 0),
+        font=font,
+    )
+    frames.append(final)
+
+    gif_bytes = io.BytesIO()
+    frames[0].save(
+        gif_bytes,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=120,
+        loop=0,
+    )
+    gif_bytes.seek(0)
+    return gif_bytes
+
+
+# =====================
+# Telegram Commands
+# =====================
+async def battle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⚔️ *Battle System Online!*\n\n"
+        "To challenge another player, use:\n`/challenge @username`",
+        parse_mode="Markdown"
+    )
+
+
+async def challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or not context.args[0].startswith("@"):
+        await update.message.reply_text("Usage: /challenge @username")
         return
 
-    # Save card to challenge
-    pending_challenges[chat_id]["cards"][user.id] = card_stats
-    await update.message.reply_text(f"✅ Card received for @{user.username}")
+    opponent = context.args[0].lower()
+    challenger = update.effective_user
+    pending_battles[opponent] = challenger.username
 
-    # Check if both players uploaded
-    challenge = pending_challenges[chat_id]
-    if len(challenge["cards"]) == 2:
-        card1, card2 = list(challenge["cards"].values())
-        winner = determine_winner(card1, card2)
-        loser = card1 if winner == card2 else card2
-
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"🏆 Battle complete!\n"
-                f"Winner: @{winner['username']}\n"
-                f"@{card1['username']} vs @{card2['username']}\n"
-                f"Stats:\n"
-                f"{card1['username']}: HP {calculate_hp(card1):.1f}\n"
-                f"{card2['username']}: HP {calculate_hp(card2):.1f}"
-            )
-        )
-        del pending_challenges[chat_id]
+    await update.message.reply_text(
+        f"⚔️ @{challenger.username} has challenged {opponent} to a battle!\n\n"
+        f"{opponent}, reply with your PFP trading card image to accept!"
+    )
 
 
-# --- FastAPI webhook ---
+async def image_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user.username
+    photo = update.message.photo[-1]
+    file = await photo.get_file()
+
+    os.makedirs("cards", exist_ok=True)
+    image_path = f"cards/{user}.jpg"
+    await file.download_to_drive(image_path)
+
+    # Match challenger & opponent
+    for opponent, challenger in pending_battles.items():
+        if user == opponent.strip("@"):
+            active_battles[user] = {"path": image_path}
+            challenger_path = f"cards/{challenger}.jpg"
+            if os.path.exists(challenger_path):
+                await run_battle(update, challenger, opponent)
+            else:
+                await update.message.reply_text(f"Card received from @{user}. Waiting for @{challenger}'s card...")
+            return
+
+        if user == challenger:
+            active_battles[user] = {"path": image_path}
+            await update.message.reply_text(f"Card received from @{user}. Waiting for the opponent to respond...")
+            return
+
+    await update.message.reply_text("Card received, but no active battle found.")
+
+
+async def run_battle(update, challenger_username, opponent_username):
+    challenger_path = f"cards/{challenger_username}.jpg"
+    opponent_path = f"cards/{opponent_username}.jpg"
+
+    challenger_stats = extract_card_stats(challenger_path)
+    opponent_stats = extract_card_stats(opponent_path)
+
+    challenger_hp = calculate_hp(challenger_stats)
+    opponent_hp = calculate_hp(opponent_stats)
+
+    while challenger_hp > 0 and opponent_hp > 0:
+        challenger_hp -= max(5, random.randint(5, 15))
+        opponent_hp -= max(5, random.randint(5, 15))
+
+    winner = (
+        f"@{challenger_username}" if challenger_hp > opponent_hp else f"@{opponent_username}"
+    )
+
+    gif = generate_battle_gif(challenger_path, opponent_path, winner)
+
+    await update.message.reply_animation(
+        animation=gif,
+        caption=(
+            f"⚔️ *Battle Complete!*\n"
+            f"🏆 Winner: {winner}\n\n"
+            f"@{challenger_username} HP: {int(challenger_hp)}\n"
+            f"@{opponent_username} HP: {int(opponent_hp)}"
+        ),
+        parse_mode="Markdown",
+    )
+
+
+# =====================
+# FastAPI Routes
+# =====================
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "PFPF Battle Bot"}
+
+
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
     data = await request.json()
@@ -140,19 +227,22 @@ async def webhook(request: Request):
     await telegram_app.process_update(update)
     return JSONResponse({"ok": True})
 
-# --- Startup / Shutdown ---
+
+# =====================
+# Lifecycle Events
+# =====================
 @app.on_event("startup")
 async def on_startup():
     global telegram_app
     telegram_app = Application.builder().token(BOT_TOKEN).build()
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("challenge", challenge))
-    telegram_app.add_handler(CommandHandler("upload_card", upload_card))  # alternatively capture photos directly
-
+    telegram_app.add_handler(CommandHandler("battle", battle_command))
+    telegram_app.add_handler(CommandHandler("challenge", challenge_command))
+    telegram_app.add_handler(MessageHandler(filters.PHOTO, image_upload))
     await telegram_app.initialize()
     await telegram_app.bot.delete_webhook(drop_pending_updates=True)
     await telegram_app.bot.set_webhook(WEBHOOK_URL)
     print(f"✅ Webhook set to {WEBHOOK_URL}")
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
