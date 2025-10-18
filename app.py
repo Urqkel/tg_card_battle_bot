@@ -90,24 +90,35 @@ async def card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     battle = ongoing_battles.setdefault(chat_id, {"player1": None, "player2": None})
 
-    # For demonstration, parse card name and stats from caption
-    caption = update.message.caption or "Unnamed Card|power:10|defense:10"
+    username = update.effective_user.username or update.effective_user.full_name
+
+    # Parse stats from caption if provided
+    caption = update.message.caption or ""
     parts = caption.split("|")
-    card_name = parts[0]
-    stats = {kv.split(":")[0]: int(kv.split(":")[1]) for kv in parts[1:] if ":" in kv}
-    card_data = {"name": card_name, **stats}
+    stats = {}
+    for kv in parts[1:]:
+        if ":" in kv:
+            key, val = kv.split(":")
+            stats[key] = int(val)
+
+    card_data = {
+        "user_id": update.effective_user.id,
+        "username": username,
+        **stats
+    }
 
     # Assign to first empty slot
     if not battle["player1"]:
         battle["player1"] = card_data
-        await update.message.reply_text(f"✅ Player 1 card received: {card_name}")
+        await update.message.reply_text(f"✅ Card received from @{username} (Player 1)")
     elif not battle["player2"]:
         battle["player2"] = card_data
-        await update.message.reply_text(f"✅ Player 2 card received: {card_name}")
+        await update.message.reply_text(f"✅ Card received from @{username} (Player 2)")
         # Both cards received, start battle
         asyncio.create_task(run_battle(chat_id))
     else:
         await update.message.reply_text("Battle already has two cards. Wait for the next round.")
+
 
 # --- FastAPI Routes ---
 @app.get("/")
