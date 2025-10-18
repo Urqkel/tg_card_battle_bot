@@ -1,20 +1,20 @@
 import os
 import asyncio
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # --- Config ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.getenv("PORT", 10000))  # Render detects this automatically
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+PORT = int(os.getenv("PORT", 8443))
 
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN is missing. Add it in Render Environment Variables.")
+    raise ValueError("BOT_TOKEN missing.")
 if not RENDER_EXTERNAL_URL:
-    raise ValueError("❌ RENDER_EXTERNAL_URL is missing. Example: https://your-app.onrender.com")
+    raise ValueError("RENDER_EXTERNAL_URL missing.")
 
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_PATH = f"/bot/{BOT_TOKEN}"
 WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
 
 # --- Flask app ---
@@ -22,41 +22,56 @@ app = Flask(__name__)
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok"}), 200
+    return {"status": "ok"}, 200
 
 @app.route("/battle")
 def battle():
     return render_template("battle.html")
 
-# --- Telegram Bot handlers ---
+# --- Telegram Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🚀 Bot is alive! Use /battle to try the game.")
 
 async def battle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    game_url = f"{RENDER_EXTERNAL_URL}/battle"
-    await update.message.reply_text(f"⚔️ Open the battle arena: {game_url}")
+    await update.message.reply_text(f"⚔️ Open the battle arena: {RENDER_EXTERNAL_URL}/battle")
 
-# --- Combined startup function ---
+# --- Combined main() ---
 async def main():
-    app_bot = Application.builder().token(BOT_TOKEN).build()
+    from telegram.ext import ApplicationBuilder
+    import threading
+
+    app_bot = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("battle", battle_command))
 
-    # Set webhook (delete old first, then set new)
-    await app_bot.bot.delete_webhook(drop_pending_updates=True)
-    await app_bot.bot.set_webhook(url=WEBHOOK_URL)
+    # Initialize before starting webhook
+    await app_bot.initialize()
 
-    # Flask runs in the same event loop via asyncio.create_task
-    async def run_flask():
-        # use waitress in production, Flask dev server for simplicity here
-        from waitress import serve
-        serve(app, host="0.0.0.0", port=PORT)
-
-    # run Flask + Telegram webhook receiver
-    await asyncio.gather(
-        app_bot.start(),
-        run_flask(),
+    # Start webhook
+    await app_bot.start()
+    await app_bot.updater.start_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=f"bot/{BOT_TOKEN}",
+        webhook_url=WEBHOOK_URL,
     )
+
+    print(f"✅ Webhook set: {WEBHOOK_URL}")
+
+    # Run Flask server in separate thread
+    def run_flask():
+        app.run(host="0.0.0.0", port=PORT)
+
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    # Idle loop keeps Telegram app alive
+    await app_bot.updater.idle()
 
 if __name__ == "__main__":
     asyncio.run(main())
