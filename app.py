@@ -1,104 +1,107 @@
 import os
-import asyncio
-from fastapi import FastAPI, Request, UploadFile, Form
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont
-import random
 
-# --- Config ---
+# ---------------- Config ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8000))
 
 if not BOT_TOKEN or not RENDER_EXTERNAL_URL:
-    raise RuntimeError("BOT_TOKEN or RENDER_EXTERNAL_URL missing in environment")
+    raise RuntimeError("BOT_TOKEN and RENDER_EXTERNAL_URL must be set in environment variables.")
 
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
 
+# ---------------- FastAPI ----------------
 app = FastAPI()
 telegram_app: Application = None
 
-# --- In-memory battle state ---
-active_challenges = {}  # challenger_id -> opponent_id
-pending_cards = {}      # user_id -> card_data
+# ---------------- Game State ----------------
+active_battles = {}  # key: frozenset of user_ids, value: battle info
+pending_cards = {}   # user_id -> card data
 
-# --- Card OCR / metadata parsing (stub) ---
+RARITY_TIERS = {
+    "Common": (1000, 1999),
+    "Rare": (300, 999),
+    "Ultra-Rare": (100, 299),
+    "Legendary": (1, 99),
+}
+
+# ---------------- Utility Functions ----------------
 def extract_card_stats(file_bytes: bytes):
     """
-    Extract stats from uploaded card. Returns a dict:
-    {
-        "name": str,
-        "power": int,
-        "defense": int,
-        "rarity": str,
-        "serial": int
-    }
+    Extract card stats from image using OCR or metadata.
+    Return dict: {'name': str, 'power': int, 'defense': int, 'rarity': str, 'serial': int}
     """
-    # --- Replace with your OCR / metadata logic ---
-    # For demo, generate random stats
+    # TODO: Replace with your OCR/metadata parsing logic
+    # Example dummy return
     return {
-        "name": f"Card{random.randint(100,999)}",
-        "power": random.randint(50, 100),
-        "defense": random.randint(30, 90),
-        "rarity": random.choice(["Common","Rare","Ultra-Rare","Legendary"]),
-        "serial": random.randint(1, 1999)
+        "name": "Card_" + str(len(pending_cards) + 1),
+        "power": 50,
+        "defense": 50,
+        "rarity": "Rare",
+        "serial": 500
     }
-
-# --- HP calculation ---
-RARITY_MULTIPLIERS = {
-    "Common": 1,
-    "Rare": 1.2,
-    "Ultra-Rare": 1.5,
-    "Legendary": 2
-}
 
 def calculate_hp(card1, card2):
     """
-    HP based on card stats, rarity multiplier, and serial number.
-    Lower serial = more exclusive.
+    Calculate temporary HP based on stats, rarity, and serial number.
+    Higher tier and lower serial = higher HP
     """
-    base1 = card1["power"] + card1["defense"]
-    base2 = card2["power"] + card2["defense"]
-    rarity_mult1 = RARITY_MULTIPLIERS.get(card1.get("rarity","Common"),1)
-    rarity_mult2 = RARITY_MULTIPLIERS.get(card2.get("rarity","Common"),1)
-    serial_bonus1 = max(1, 2000 - card1.get("serial",1000)) / 2000
-    serial_bonus2 = max(1, 2000 - card2.get("serial",1000)) / 2000
-    hp1 = int(base1 * rarity_mult1 * serial_bonus1)
-    hp2 = int(base2 * rarity_mult2 * serial_bonus2)
-    return hp1, hp2
+    def card_hp(card):
+        rarity_factor = {
+            "Common": 1,
+            "Rare": 2,
+            "Ultra-Rare": 3,
+            "Legendary": 4
+        }.get(card.get("rarity"), 1)
+        serial_factor = max(1, 2000 - card.get("serial", 1000)) / 1000
+        stat_factor = card.get("power", 0) + card.get("defense", 0)
+        return int((stat_factor * rarity_factor) * serial_factor)
 
-# --- Simple local battle GIF generator ---
-def generate_battle_gif(card1_name, card2_name):
+    return card_hp(card1), card_hp(card2)
+
+def generate_battle_gif(name1: str, name2: str) -> BytesIO:
+    """
+    Generate a simple local GIF animation for the battle.
+    Returns BytesIO.
+    """
+    from PIL import Image, ImageDraw
+    import imageio
+
     frames = []
     for i in range(5):
-        img = Image.new("RGB", (400,100), color=(255,255,255))
+        img = Image.new("RGB", (300, 150), color=(255, 255, 255))
         d = ImageDraw.Draw(img)
-        d.text((20,20), f"{card1_name} attacks {card2_name}!", fill=(0,0,0))
+        d.text((10, 50), f"{name1} ⚔ {name2}", fill=(0, 0, 0))
+        d.text((10, 80), "Battle ongoing..." + "." * i, fill=(0, 0, 0))
         frames.append(img)
-    bio = BytesIO()
-    frames[0].save(bio, format="GIF", save_all=True, append_images=frames[1:], duration=500, loop=0)
-    bio.seek(0)
-    return bio
 
-# --- Handlers ---
+    gif_bytes = BytesIO()
+    imageio.mimsave(gif_bytes, frames, format="GIF", duration=0.5)
+    gif_bytes.seek(0)
+    return gif_bytes
+
+# ---------------- Telegram Handlers ----------------
 async def challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args or len(context.args) < 1:
+    if not context.args or not context.args[0].startswith("@"):
         await update.message.reply_text("Usage: /challenge @username")
         return
 
-    opponent_username = context.args[0].lstrip("@")
-    challenger_id = update.effective_user.id
-    opponent_id = None  # We'll resolve this later when opponent uploads
+    challenger = update.effective_user
+    opponent_username = context.args[0][1:]  # remove @
+    active_battles[frozenset({challenger.id, opponent_username})] = {
+        "challenger": challenger.id,
+        "opponent_username": opponent_username
+    }
 
-    # Record active challenge
-    active_challenges[challenger_id] = {"opponent_username": opponent_username, "opponent_id": None}
     await update.message.reply_text(
-        f"⚔️ @{update.effective_user.username} has challenged @{opponent_username}!\n"
-        "Both players must upload their cards to start the battle."
+        f"⚔️ @{challenger.username} has challenged @{opponent_username}! "
+        "Both players, please upload your card to start the battle."
     )
 
 async def upload_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -117,16 +120,23 @@ async def upload_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check for any active battle this user is in
     for players_ids, battle_info in list(active_battles.items()):
         if user.id in players_ids:
+            # Resolve opponent_id
+            if isinstance(players_ids, frozenset):
+                # Map usernames to ids if needed
+                ids = list(players_ids)
+                opponent_id = next((pid for pid in ids if pid != user.id), None)
+            else:
+                opponent_id = None
+
             # Both players uploaded their cards?
-            if all(pid in pending_cards for pid in players_ids):
-                pid1, pid2 = tuple(players_ids)
-                card1 = pending_cards[pid1]
-                card2 = pending_cards[pid2]
+            if opponent_id in pending_cards and user.id in pending_cards:
+                card1 = pending_cards[user.id]
+                card2 = pending_cards[opponent_id]
+
                 hp1, hp2 = calculate_hp(card1, card2)
-                winner_id = pid1 if hp1 >= hp2 else pid2
+                winner_id = user.id if hp1 >= hp2 else opponent_id
                 winner_username = context.bot.get_chat(winner_id).username
 
-                # Generate GIF
                 gif_bytes = generate_battle_gif(card1["name"], card2["name"])
                 await update.message.reply_document(document=gif_bytes, filename="battle.gif")
 
@@ -136,45 +146,12 @@ async def upload_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
                 # Clean up
-                for pid in players_ids:
-                    pending_cards.pop(pid, None)
+                pending_cards.pop(user.id, None)
+                pending_cards.pop(opponent_id, None)
                 active_battles.pop(players_ids)
             break
 
-    await update.message.reply_text(f"✅ @{user.username}'s card received!")
-
-    # If we have both cards, start battle
-    if challenger_info:
-        challenger_id = user.id
-        opponent_username = challenger_info["opponent_username"]
-        opponent_id = challenger_info.get("opponent_id")
-        # Try to resolve opponent_id if unknown
-        for uid, _ in pending_cards.items():
-            if uid != user.id and opponent_id is None:
-                opponent_id = uid
-                challenger_info["opponent_id"] = opponent_id
-
-        if opponent_id and challenger_id in pending_cards and opponent_id in pending_cards:
-            card1 = pending_cards[challenger_id]
-            card2 = pending_cards[opponent_id]
-            hp1, hp2 = calculate_hp(card1, card2)
-            winner = user.username if hp1 >= hp2 else opponent_username
-
-            # Generate GIF
-            gif_bytes = generate_battle_gif(card1["name"], card2["name"])
-            await update.message.reply_document(document=gif_bytes, filename="battle.gif")
-
-            await update.message.reply_text(
-                f"⚔️ Battle complete!\nWinner: @{winner}\n"
-                f"{card1['name']} vs {card2['name']}"
-            )
-
-            # Clean up
-            del pending_cards[challenger_id]
-            del pending_cards[opponent_id]
-            del active_challenges[challenger_id]
-
-# --- FastAPI routes ---
+# ---------------- FastAPI Routes ----------------
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "Card Battle Bot"}
@@ -186,7 +163,7 @@ async def webhook(request: Request):
     await telegram_app.process_update(update)
     return JSONResponse({"ok": True})
 
-# --- Lifecycle ---
+# ---------------- Lifecycle ----------------
 @app.on_event("startup")
 async def on_startup():
     global telegram_app
