@@ -15,7 +15,7 @@ if not BOT_TOKEN:
 if not RENDER_EXTERNAL_URL:
     raise ValueError("RENDER_EXTERNAL_URL is missing. Set RENDER_EXTERNAL_URL in Render.")
 
-WEBHOOK_PATH = f"/{BOT_TOKEN}"
+WEBHOOK_PATH = f"/bot/{BOT_TOKEN}"
 WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
 
 # --- Flask app ---
