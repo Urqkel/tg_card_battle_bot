@@ -1,4 +1,5 @@
-python-telegram-bot==20.3
 fastapi
-uvicorn[standard]
-python-multipart
+python-telegram-bot==20.3
+pytesseract
+Pillow
+uvicorn
