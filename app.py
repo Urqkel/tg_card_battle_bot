@@ -26,54 +26,72 @@ telegram_app: Application = None
 # Map chat_id -> {'player1': card, 'player2': card}
 ongoing_battles = {}
 
-# --- Utility functions ---
-def calculate_temp_hp(card1, card2):
-    """Create temporary HP based on stats."""
-    base1 = card1.get("power", 10) + card1.get("defense", 10)
-    base2 = card2.get("power", 10) + card2.get("defense", 10)
-    # Normalize to 50-100 range
-    hp1 = min(max(base1, 50), 100)
-    hp2 = min(max(base2, 50), 100)
-    return hp1, hp2
+# --- Define rarity base HP and max serial ranges ---
+RARITY_BASE_HP = {
+    "Common": 100,
+    "Rare": 200,
+    "Ultra-Rare": 300,
+    "Legendary": 400,
+}
 
-async def generate_battle_gif(card1, card2):
-    """
-    Simulate async GIF generation of battle.
-    Replace this with your actual GIF generation logic.
-    """
-    await asyncio.sleep(1)  # simulate processing delay
-    # For now, return a placeholder file path
-    return "placeholder_battle.gif"
+SERIAL_MAX = {
+    "Common": 1999,
+    "Rare": 999,
+    "Ultra-Rare": 299,
+    "Legendary": 99,
+}
 
-async def run_battle(chat_id):
-    battle = ongoing_battles.get(chat_id)
-    if not battle:
+def compute_hp(card):
+    rarity = card.get("rarity")
+    serial = card.get("serial_number", SERIAL_MAX.get(rarity, 100))
+    power = card.get("power", 50)
+    defense = card.get("defense", 50)
+
+    base_hp = RARITY_BASE_HP.get(rarity, 100)
+    max_serial = SERIAL_MAX.get(rarity, 1000)
+    serial_factor = (1 - (serial / max_serial)) * 50  # lower serial = higher HP
+
+    temp_hp = base_hp + serial_factor + power + defense
+    return temp_hp
+
+async def run_battle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user1 = update.message.from_user
+    chat_id = update.message.chat_id
+
+    # Ensure both players have uploaded a card
+    if len(context.chat_data.get("cards", {})) < 2:
+        await update.message.reply_text("⚠️ Both players must upload a card to battle!")
         return
-    card1 = battle.get("player1")
-    card2 = battle.get("player2")
-    if not card1 or not card2:
-        return
 
-    hp1, hp2 = calculate_temp_hp(card1, card2)
+    cards = context.chat_data["cards"]
+    (user1_id, card1), (user2_id, card2) = list(cards.items())
 
-    # Simulate battle result
-    winner = "player1" if hp1 >= hp2 else "player2"
+    # Compute temporary HP
+    hp1 = compute_hp(card1)
+    hp2 = compute_hp(card2)
 
-    # Generate GIF
-    gif_path = await generate_battle_gif(card1, card2)
+    # Determine winner
+    if hp1 > hp2:
+        winner = f"@{user1.username}" if user1_id == user1.id else f"@{card1.get('owner_username', 'Player1')}"
+    elif hp2 > hp1:
+        winner = f"@{user2.username}" if user2_id != user1.id else f"@{card2.get('owner_username', 'Player2')}"
+    else:
+        winner = "It's a tie!"
+
+    # Prepare battle summary
+    card1_name = card1.get("name", "Unnamed Card")
+    card2_name = card2.get("name", "Unnamed Card")
+    result_text = (
+        f"⚔️ Battle complete!\nWinner: {winner}\n"
+        f"@{user1.username}'s {card1_name} ({hp1:.1f} HP) vs "
+        f"@{user2.username}'s {card2_name} ({hp2:.1f} HP)"
+    )
 
     # Send result
-    bot = telegram_app.bot
-    result_text = f"⚔️ Battle complete!\nWinner: {winner}\n{card1['name']} vs {card2['name']}"
-    await bot.send_message(chat_id=chat_id, text=result_text)
-    try:
-        with open(gif_path, "rb") as f:
-            await bot.send_animation(chat_id=chat_id, animation=InputFile(f))
-    except FileNotFoundError:
-        await bot.send_message(chat_id=chat_id, text="Battle GIF not found.")
+    await context.bot.send_message(chat_id=chat_id, text=result_text)
 
-    # Clear battle
-    ongoing_battles.pop(chat_id, None)
+    # Clear cards for next battle
+    context.chat_data["cards"] = {}
 
 # --- Telegram Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
