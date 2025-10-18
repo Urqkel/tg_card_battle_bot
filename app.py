@@ -300,7 +300,7 @@ def generate_battle_gif_bytes(card1: dict, card2: dict, hp1_start: int, hp2_star
 async def cmd_battle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Wake/help command: explain how to start a battle."""
     await update.message.reply_text(
-        "⚔️ PFPF Battle System\n"
+        "⚔️ PFP Battle System\n"
         "Start a match with: /challenge @username\n"
         "Then both players upload their card images (photo or document) in this chat."
     )
@@ -366,7 +366,7 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     card["user_id"] = user.id
     uploaded_cards[user.id] = card
 
-    await update.message.reply_text(f"✅ Card received for @{username} — parsed: Power {card['power']} | Defense {card['defense']} | Rarity {card['rarity']} | Serial {card['serial']}")
+    await update.message.reply_text(f"✅ Card received for @{username}")
 
     # find whether this upload belongs to any pending challenge
     # Cases:
