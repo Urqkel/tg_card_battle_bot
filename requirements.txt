@@ -1,6 +1,6 @@
-imageio
-pillow
-pytesseract
-python-telegram-bot==20.3
 fastapi
 uvicorn
+python-telegram-bot==20.3
+pytesseract
+Pillow
+imageio
