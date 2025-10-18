@@ -1,101 +1,65 @@
 import os
-import asyncio
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.responses import JSONResponse
-from telegram import Update, InputFile
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+import random
 
-# --- Environment ---
+# --- Config ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8000))
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN not set.")
-if not RENDER_EXTERNAL_URL:
-    raise RuntimeError("RENDER_EXTERNAL_URL not set.")
+if not BOT_TOKEN or not RENDER_EXTERNAL_URL:
+    raise RuntimeError("BOT_TOKEN or RENDER_EXTERNAL_URL missing.")
 
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
 
-# --- FastAPI ---
 app = FastAPI()
 telegram_app: Application = None
 
-# --- In-memory storage for simplicity ---
-# Map chat_id -> {'player1': card, 'player2': card}
-ongoing_battles = {}
+# --- In-memory storage ---
+pending_challenges = {}  # chat_id -> {challenger_id, challenged_username, cards}
 
-# --- Define rarity base HP and max serial ranges ---
-RARITY_BASE_HP = {
-    "Common": 100,
-    "Rare": 200,
-    "Ultra-Rare": 300,
-    "Legendary": 400,
-}
+# --- Helper functions ---
+def calculate_hp(card):
+    # Determine rarity factor
+    rarity_map = {
+        "Legendary": 4,
+        "Ultra-Rare": 3,
+        "Rare": 2,
+        "Common": 1
+    }
+    rarity_factor = rarity_map.get(card.get("rarity"), 1)
 
-SERIAL_MAX = {
-    "Common": 1999,
-    "Rare": 999,
-    "Ultra-Rare": 299,
-    "Legendary": 99,
-}
+    # Lower serial = more exclusive, give bonus
+    serial_bonus = max(0, 2000 - int(card.get("serial_number", 1000))) / 500
 
-def compute_hp(card):
-    rarity = card.get("rarity")
-    serial = card.get("serial_number", SERIAL_MAX.get(rarity, 100))
-    power = card.get("power", 50)
-    defense = card.get("defense", 50)
+    # Power & defense stats
+    power = int(card.get("power", 10))
+    defense = int(card.get("defense", 10))
 
-    base_hp = RARITY_BASE_HP.get(rarity, 100)
-    max_serial = SERIAL_MAX.get(rarity, 1000)
-    serial_factor = (1 - (serial / max_serial)) * 50  # lower serial = higher HP
+    hp = (power + defense) * rarity_factor + serial_bonus
+    return hp
 
-    temp_hp = base_hp + serial_factor + power + defense
-    return temp_hp
-
-async def run_battle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user1 = update.message.from_user
-    chat_id = update.message.chat_id
-
-    # Ensure both players have uploaded a card
-    if len(context.chat_data.get("cards", {})) < 2:
-        await update.message.reply_text("⚠️ Both players must upload a card to battle!")
-        return
-
-    cards = context.chat_data["cards"]
-    (user1_id, card1), (user2_id, card2) = list(cards.items())
-
-    # Compute temporary HP
-    hp1 = compute_hp(card1)
-    hp2 = compute_hp(card2)
-
-    # Determine winner
+def determine_winner(card1, card2):
+    hp1 = calculate_hp(card1)
+    hp2 = calculate_hp(card2)
     if hp1 > hp2:
-        winner = f"@{user1.username}" if user1_id == user1.id else f"@{card1.get('owner_username', 'Player1')}"
+        return card1
     elif hp2 > hp1:
-        winner = f"@{user2.username}" if user2_id != user1.id else f"@{card2.get('owner_username', 'Player2')}"
+        return card2
     else:
-        winner = "It's a tie!"
+        # tie-breaker random
+        return random.choice([card1, card2])
 
-    # Prepare battle summary
-    card1_name = card1.get("name", "Unnamed Card")
-    card2_name = card2.get("name", "Unnamed Card")
-    result_text = (
-        f"⚔️ Battle complete!\nWinner: {winner}\n"
-        f"@{user1.username}'s {card1_name} ({hp1:.1f} HP) vs "
-        f"@{user2.username}'s {card2_name} ({hp2:.1f} HP)"
-    )
-
-    # Send result
-    await context.bot.send_message(chat_id=chat_id, text=result_text)
-
-    # Clear cards for next battle
-    context.chat_data["cards"] = {}
-
-# --- Telegram Handlers ---
+# --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🥊 Get Ready to Rumble! Use /challenge @username to start a battle.")
+    await update.message.reply_text(
+        "👋 Welcome to the Card Battle Arena!\n"
+        "Use /challenge @username to start a battle."
+    )
 
 async def challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -106,75 +70,85 @@ async def challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     challenger = update.message.from_user
     chat_id = update.effective_chat.id
 
-    # Wake up the bot and register pending challenge
     pending_challenges[chat_id] = {
-        "challenger_id": challenger.id,
-        "challenged_username": challenged_username
+        "challenger": {"id": challenger.id, "username": challenger.username},
+        "challenged": {"username": challenged_username},
+        "cards": {}
     }
 
     await update.message.reply_text(
         f"⚔️ @{challenger.username} has challenged @{challenged_username}!\n"
-        f"Both players, please upload your cards to start the battle."
+        "Both players, please upload your cards to start the battle."
     )
 
-async def card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def upload_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    battle = ongoing_battles.setdefault(chat_id, {"player1": None, "player2": None})
+    if chat_id not in pending_challenges:
+        await update.message.reply_text("⚠️ No active challenge. Start with /challenge @username")
+        return
 
-    username = update.effective_user.username or update.effective_user.full_name
+    user = update.message.from_user
+    if not update.message.photo:
+        await update.message.reply_text("⚠️ Please upload an image of your card.")
+        return
 
-    # Parse stats from caption if provided
-    caption = update.message.caption or ""
-    parts = caption.split("|")
-    stats = {}
-    for kv in parts[1:]:
-        if ":" in kv:
-            key, val = kv.split(":")
-            stats[key] = int(val)
+    # Download the image
+    file = await update.message.photo[-1].get_file()
+    file_path = f"/tmp/{user.id}_card.jpg"
+    await file.download_to_drive(file_path)
 
-    card_data = {
-        "user_id": update.effective_user.id,
-        "username": username,
-        **stats
-    }
+    # --- OCR / Metadata Extraction ---
+    # Use your existing function from the card generator bot
+    try:
+        card_stats = extract_card_stats(file_path)
+        # Expected output: dict with keys: name, power, defense, rarity, serial_number
+        card_stats["username"] = user.username
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Failed to extract card stats: {str(e)}")
+        return
 
-    # Assign to first empty slot
-    if not battle["player1"]:
-        battle["player1"] = card_data
-        await update.message.reply_text(f"✅ Card received from @{username} (Player 1)")
-    elif not battle["player2"]:
-        battle["player2"] = card_data
-        await update.message.reply_text(f"✅ Card received from @{username} (Player 2)")
-        # Both cards received, start battle
-        asyncio.create_task(run_battle(chat_id))
-    else:
-        await update.message.reply_text("Battle already has two cards. Wait for the next round.")
+    # Save card to challenge
+    pending_challenges[chat_id]["cards"][user.id] = card_stats
+    await update.message.reply_text(f"✅ Card received for @{user.username}")
+
+    # Check if both players uploaded
+    challenge = pending_challenges[chat_id]
+    if len(challenge["cards"]) == 2:
+        card1, card2 = list(challenge["cards"].values())
+        winner = determine_winner(card1, card2)
+        loser = card1 if winner == card2 else card2
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"🏆 Battle complete!\n"
+                f"Winner: @{winner['username']}\n"
+                f"@{card1['username']} vs @{card2['username']}\n"
+                f"Stats:\n"
+                f"{card1['username']}: HP {calculate_hp(card1):.1f}\n"
+                f"{card2['username']}: HP {calculate_hp(card2):.1f}"
+            )
+        )
+        del pending_challenges[chat_id]
 
 
-# --- FastAPI Routes ---
-@app.get("/")
-async def root():
-    return {"status": "ok", "service": "Card Battle Bot"}
-
+# --- FastAPI webhook ---
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
-    try:
-        data = await request.json()
-        update = Update.de_json(data, telegram_app.bot)
-        await telegram_app.process_update(update)
-        return JSONResponse({"ok": True})
-    except Exception as e:
-        print("❌ Error processing update:", e)
-        return JSONResponse({"ok": False, "error": str(e)})
+    data = await request.json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return JSONResponse({"ok": True})
 
-# --- Lifecycle ---
+# --- Startup / Shutdown ---
 @app.on_event("startup")
 async def on_startup():
     global telegram_app
     telegram_app = Application.builder().token(BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("challenge", battle_command))
-    telegram_app.add_handler(MessageHandler(filters.PHOTO, card_upload))
+    telegram_app.add_handler(CommandHandler("challenge", challenge))
+    telegram_app.add_handler(CommandHandler("upload_card", upload_card))  # alternatively capture photos directly
+
     await telegram_app.initialize()
     await telegram_app.bot.delete_webhook(drop_pending_updates=True)
     await telegram_app.bot.set_webhook(WEBHOOK_URL)
