@@ -112,14 +112,33 @@ async def upload_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
     card_data = extract_card_stats(file_bytes)
     pending_cards[user.id] = card_data
 
-    # Check if this user is in a challenge
-    challenger_info = None
-    for cid, info in active_challenges.items():
-        if cid == user.id:
-            challenger_info = info
-            break
-        elif info["opponent_id"] == user.id:
-            challenger_info = info
+    await update.message.reply_text(f"✅ @{user.username}'s card received!")
+
+    # Check for any active battle this user is in
+    for players_ids, battle_info in list(active_battles.items()):
+        if user.id in players_ids:
+            # Both players uploaded their cards?
+            if all(pid in pending_cards for pid in players_ids):
+                pid1, pid2 = tuple(players_ids)
+                card1 = pending_cards[pid1]
+                card2 = pending_cards[pid2]
+                hp1, hp2 = calculate_hp(card1, card2)
+                winner_id = pid1 if hp1 >= hp2 else pid2
+                winner_username = context.bot.get_chat(winner_id).username
+
+                # Generate GIF
+                gif_bytes = generate_battle_gif(card1["name"], card2["name"])
+                await update.message.reply_document(document=gif_bytes, filename="battle.gif")
+
+                await update.message.reply_text(
+                    f"⚔️ Battle complete!\nWinner: @{winner_username}\n"
+                    f"{card1['name']} vs {card2['name']}"
+                )
+
+                # Clean up
+                for pid in players_ids:
+                    pending_cards.pop(pid, None)
+                active_battles.pop(players_ids)
             break
 
     await update.message.reply_text(f"✅ @{user.username}'s card received!")
