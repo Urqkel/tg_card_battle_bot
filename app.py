@@ -173,7 +173,7 @@ async def on_startup():
     global telegram_app
     telegram_app = Application.builder().token(BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("battle", battle_command))
+    telegram_app.add_handler(CommandHandler("challenge", battle_command))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, card_upload))
     await telegram_app.initialize()
     await telegram_app.bot.delete_webhook(drop_pending_updates=True)
