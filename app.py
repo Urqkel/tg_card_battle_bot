@@ -63,47 +63,62 @@ def run_battle(card1, card2):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Bot is alive! Use /battle @opponent to start a game.")
 
+# --- In-memory storage ---
+active_battles = {}  # {chat_id: {"challenger_id": int, "opponent_id": int, "cards": {user_id: card_data}}}
+
 async def battle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("⚔️ Usage: /battle @opponent")
         return
 
-    opponent_username = context.args[0]
+    opponent_username = context.args[0].lstrip("@")
     chat_id = update.effective_chat.id
     challenger_id = update.effective_user.id
 
-    active_battles[chat_id] = {"challenger": challenger_id, "opponent": opponent_username}
+    active_battles[chat_id] = {
+        "challenger_id": challenger_id,
+        "opponent_username": opponent_username,
+        "opponent_id": None,  # to be filled when opponent uploads
+        "cards": {}
+    }
+
     await update.message.reply_text(
-        f"Challenge sent to {opponent_username}! Both players, please upload your trading cards."
+        f"Challenge sent to @{opponent_username}! Both players, please upload your trading cards."
     )
+
 
 async def card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
+    battle = active_battles.get(chat_id)
+
+    if not battle:
+        await update.message.reply_text("No active battle in this chat. Start one with /battle @username.")
+        return
 
     if not update.message.photo:
         await update.message.reply_text("Please upload your trading card image.")
         return
 
     file_id = update.message.photo[-1].file_id
-    user_cards[user_id] = {"file_id": file_id, "stats": generate_card_stats(file_id)}
+    card_stats = generate_card_stats(file_id)
+    battle["cards"][user_id] = {"file_id": file_id, "stats": card_stats}
+
+    # If this is the opponent uploading, set their user ID
+    if user_id != battle["challenger_id"] and battle["opponent_id"] is None:
+        battle["opponent_id"] = user_id
+
     await update.message.reply_text("✅ Card uploaded!")
 
-    # Check if both players have uploaded cards
-    battle = active_battles.get(chat_id)
-    if not battle:
-        return
-
-    challenger_id = battle["challenger"]
-    opponent_id = get_user_id(battle["opponent"])
-
-    if challenger_id in user_cards and opponent_id in user_cards:
-        result_text = run_battle(user_cards[challenger_id], user_cards[opponent_id])
+    # Check if both players have uploaded
+    if battle["challenger_id"] in battle["cards"] and battle["opponent_id"] in battle["cards"]:
+        card1 = battle["cards"][battle["challenger_id"]]
+        card2 = battle["cards"][battle["opponent_id"]]
+        result_text = run_battle(card1, card2)
         await update.message.reply_text(result_text)
+
         # Cleanup
         del active_battles[chat_id]
-        del user_cards[challenger_id]
-        del user_cards[opponent_id]
 
 # --- FastAPI Routes ---
 @app.get("/")
