@@ -95,13 +95,26 @@ async def run_battle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Telegram Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Card Battle Bot is online! Use /battle to start a game.")
+    await update.message.reply_text("🥊 Get Ready to Rumble! Use /challenge @username to start a battle.")
 
-async def battle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /challenge @username")
+        return
+
+    challenged_username = context.args[0].lstrip("@")
+    challenger = update.message.from_user
     chat_id = update.effective_chat.id
-    ongoing_battles.setdefault(chat_id, {"player1": None, "player2": None})
+
+    # Wake up the bot and register pending challenge
+    pending_challenges[chat_id] = {
+        "challenger_id": challenger.id,
+        "challenged_username": challenged_username
+    }
+
     await update.message.reply_text(
-        "⚔️ Battle started! Both players, please upload your cards as images or JSON."
+        f"⚔️ @{challenger.username} has challenged @{challenged_username}!\n"
+        f"Both players, please upload your cards to start the battle."
     )
 
 async def card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
