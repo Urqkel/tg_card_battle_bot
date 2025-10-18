@@ -1,5 +1,6 @@
-fastapi
-python-telegram-bot==20.3
+imageio
+pillow
 pytesseract
-Pillow
+python-telegram-bot==20.3
+fastapi
 uvicorn
