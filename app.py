@@ -654,7 +654,7 @@ async def on_shutdown():
 # ---------- Health Check ----------
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "PFPF Battle Bot"}
+    return {"status": "ok", "service": "PFP Card Battle Bot"}
 
 # ---------- Render Deployment Notes ----------
 # 1. Use the provided Dockerfile to install tesseract-ocr.
