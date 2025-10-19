@@ -27,7 +27,7 @@ import time
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 8000))
-TESSERACT_CMD = os.getenv("TESSERACT_CMD", "/usr/bin/tesseract")  # Default for Linux
+TESSERACT_CMD = os.getenv("TESSERACT_CMD", "/usr/bin/tesseract")  # Default for Render's Docker image
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing in environment.")
@@ -232,12 +232,15 @@ async def extract_card_stats_from_bytes(file_bytes: bytes, username: str, user_i
     return card
 
 async def notify_ocr_failure(user_id: int, chat_id: int, error: str):
-    """Notify user of OCR failure with specific guidance."""
+    """Notify user of OCR failure with Render-specific guidance."""
     error_msg = "⚠️ Couldn't read card stats due to an OCR error.\n"
-    if "tesseract is not installed" in error.lower():
-        error_msg += "Tesseract OCR is not installed or not in PATH. Please upload a clearer image or contact the bot admin.\n"
+    if "tesseract is not installed" in error.lower() or "not in your PATH" in error.lower():
+        error_msg += (
+            "Tesseract OCR is not installed or misconfigured in the Render environment.\n"
+            "Admin: Ensure `tesseract-ocr` is installed in the Dockerfile and TESSERACT_CMD is set to /usr/bin/tesseract.\n"
+        )
     else:
-        error_msg += f"Error: {error}\nPlease upload a clearer image or contact the bot admin.\n"
+        error_msg += f"Error: {error}\nPlease upload a clearer image with readable text (high contrast, clear font).\n"
     error_msg += "Using defaults (Power: 50, Defense: 50, Rarity: Common, Serial: 1000).\nUse /confirm to verify or edit stats."
     await telegram_app.bot.send_message(chat_id=chat_id, text=error_msg)
 
@@ -290,6 +293,7 @@ def generate_battle_gif_bytes(card1: dict, card2: dict, hp1_start: int, hp2_star
     try:
         font = ImageFont.truetype("arial.ttf", 18)
     except Exception:
+        log.warning("arial.ttf not found; using default font")
         font = ImageFont.load_default()
 
     steps = 12
@@ -342,7 +346,8 @@ async def cmd_battle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2. Both players upload card images (photo or document).\n"
         "3. Confirm stats with /confirm if needed.\n"
         "4. View your card: /stats\n"
-        "5. Cancel a challenge: /cancel"
+        "5. Cancel a challenge: /cancel\n"
+        "Note: Ensure your card image is clear for accurate OCR."
     )
 
 async def cmd_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -433,4 +438,71 @@ async def cmd_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.commit()
 
     await update.message.reply_text("✅ Card stats updated and confirmed!")
-    await check_battle_ready(user_id, chat
+    await check_battle_ready(user_id, chat_id)
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user's uploaded card stats."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    async with db_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("SELECT username, power, defense, rarity, serial, confirmed FROM cards WHERE user_id = ? AND chat_id = ?",
+                      (user_id, chat_id))
+            card = c.fetchone()
+            if not card:
+                await update.message.reply_text("No card uploaded in this chat.")
+                return
+            username, power, defense, rarity, serial, confirmed = card
+            status = "Confirmed" if confirmed else "Unconfirmed (use /confirm)"
+            await update.message.reply_text(
+                f"Card for @{username}:\n"
+                f"Power: {power}\nDefense: {defense}\nRarity: {rarity}\nSerial: {serial}\nStatus: {status}"
+            )
+
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel a pending challenge."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    async with db_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("DELETE FROM challenges WHERE challenger_id = ? AND chat_id = ?", (user_id, chat_id))
+            c.execute("SELECT file_path FROM cards WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
+            card = c.fetchone()
+            if card:
+                try:
+                    os.remove(card[0])
+                except Exception:
+                    log.warning("Failed to delete card file: %s", card[0])
+                c.execute("DELETE FROM cards WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
+            conn.commit()
+
+    await update.message.reply_text("✅ Challenge canceled and card removed if uploaded.")
+
+async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle uploaded card image."""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    username = user.username or f"user{user.id}"
+
+    # Rate limiting
+    now = time.time()
+    request_counts.setdefault(user.id, [])
+    request_counts[user.id] = [t for t in request_counts[user.id] if now - t < 60]
+    if len(request_counts[user.id]) >= RATE_LIMIT:
+        await update.message.reply_text("⏳ Too many requests. Please wait a minute.")
+        return
+    request_counts[user.id].append(now)
+
+    file_obj = None
+    if update.message.photo:
+        file_obj = await update.message.photo[-1].get_file()
+    elif update.message.document:
+        file_obj = await update.message.document.get_file()
+    else:
+        await update.message.reply_text("Please upload an image (photo or document).")
+        return
+
+    file_bytes = await file_obj.download_as_bytearray()
+  
