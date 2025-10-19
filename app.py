@@ -505,4 +505,162 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     file_bytes = await file_obj.download_as_bytearray()
-  
+    card = await extract_card_stats_from_bytes(file_bytes, username, user.id, chat_id)
+    await update.message.reply_text(
+        f"✅ Card received for @{username}:\n"
+        f"Power: {card['power']}, Defense: {card['defense']}, Rarity: {card['rarity']}, Serial: {card['serial']}\n"
+        f"Use /confirm to verify or edit stats."
+    )
+    await check_battle_ready(user_id, chat_id)
+
+async def check_battle_ready(user_id: int, chat_id: int):
+    """Check if both players in a challenge have uploaded confirmed cards."""
+    async with db_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("SELECT challenger_id, opponent_username FROM challenges WHERE chat_id = ?", (chat_id,))
+            challenges = c.fetchall()
+            for challenger_id, opponent_username in challenges:
+                c.execute("SELECT user_id, username, file_path, power, defense, rarity, serial, confirmed FROM cards "
+                          "WHERE user_id = ? AND chat_id = ? AND confirmed = 1", (challenger_id, chat_id))
+                card1 = c.fetchone()
+                if not card1:
+                    continue
+                c.execute("SELECT user_id, username, file_path, power, defense, rarity, serial, confirmed FROM cards "
+                          "WHERE username = ? AND chat_id = ? AND confirmed = 1", (opponent_username, chat_id))
+                card2 = c.fetchone()
+                if not card2:
+                    continue
+
+                card1_dict = {
+                    "user_id": card1[0], "username": card1[1], "file_path": card1[2],
+                    "power": card1[3], "defense": card1[4], "rarity": card1[5], "serial": card1[6]
+                }
+                card2_dict = {
+                    "user_id": card2[0], "username": card2[1], "file_path": card2[2],
+                    "power": card2[3], "defense": card2[4], "rarity": card2[5], "serial": card2[6]
+                }
+
+                hp1 = calculate_card_hp(card1_dict)
+                hp2 = calculate_card_hp(card2_dict)
+                hp1_end, hp2_end = simulate_battle(hp1, hp2, card1_dict["power"], card1_dict["defense"],
+                                                  card2_dict["power"], card2_dict["defense"])
+                log.info("Battle: @%s (HP %d -> %d) vs @%s (HP %d -> %d)",
+                         card1_dict["username"], hp1, hp1_end, card2_dict["username"], hp2, hp2_end)
+
+                gif_bytes = generate_battle_gif_bytes(card1_dict, card2_dict, hp1, hp2, hp1_end, hp2_end)
+                try:
+                    await telegram_app.bot.send_document(chat_id=chat_id, document=InputFile(gif_bytes, filename="battle.gif"))
+                except Exception as e:
+                    log.exception("Failed to send battle GIF: %s", e)
+                    await telegram_app.bot.send_message(chat_id=chat_id, text="Battle finished (GIF send failed).")
+
+                winner = card1_dict["username"] if hp1_end > hp2_end else card2_dict["username"] if hp2_end > hp1_end else None
+                caption = f"⚔️ Battle complete!\n"
+                caption += f"🏆 Winner: @{winner}\n" if winner else "🤝 It's a tie!\n"
+                caption += f"@{card1_dict['username']} HP: {hp1_end} vs @{card2_dict['username']} HP: {hp2_end}"
+                await telegram_app.bot.send_message(chat_id=chat_id, text=caption)
+
+                try:
+                    os.remove(card1_dict["file_path"])
+                    os.remove(card2_dict["file_path"])
+                except Exception:
+                    log.warning("Failed to delete card files: %s, %s", card1_dict["file_path"], card2_dict["file_path"])
+                c.execute("DELETE FROM cards WHERE user_id IN (?, ?) AND chat_id = ?", (card1_dict["user_id"], card2_dict["user_id"], chat_id))
+                c.execute("DELETE FROM challenges WHERE challenger_id = ? AND chat_id = ?", (challenger_id, chat_id))
+                conn.commit()
+
+# ---------- Cleanup Task ----------
+async def cleanup_stale_challenges():
+    """Remove challenges and cards older than CHALLENGE_TIMEOUT."""
+    while True:
+        async with db_lock:
+            with sqlite3.connect(DB_PATH) as conn:
+                c = conn.cursor()
+                cutoff = (datetime.utcnow() - CHALLENGE_TIMEOUT).isoformat()
+                c.execute("SELECT challenger_id, chat_id, opponent_username FROM challenges WHERE timestamp < ?", (cutoff,))
+                stale = c.fetchall()
+                for challenger_id, chat_id, opponent_username in stale:
+                    c.execute("SELECT file_path FROM cards WHERE user_id = ? AND chat_id = ?", (challenger_id, chat_id))
+                    card = c.fetchone()
+                    if card:
+                        try:
+                            os.remove(card[0])
+                        except Exception:
+                            log.warning("Failed to delete card file: %s", card[0])
+                    c.execute("DELETE FROM cards WHERE user_id = ? AND chat_id = ?", (challenger_id, chat_id))
+                    c.execute("DELETE FROM challenges WHERE challenger_id = ? AND chat_id = ?", (challenger_id, chat_id))
+                    await telegram_app.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"🕒 Challenge from <@{challenger_id}> to @{opponent_username} timed out."
+                    )
+                conn.commit()
+        await asyncio.sleep(60)
+
+# ---------- FastAPI Webhook ----------
+@app.post(WEBHOOK_PATH)
+async def webhook(request: Request):
+    try:
+        data = await request.json()
+        update = Update.de_json(data, telegram_app.bot)
+        await telegram_app.process_update(update)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        log.exception("Webhook error: %s", e)
+        raise HTTPException(status_code=400, detail="Invalid webhook data")
+
+# ---------- Startup / Shutdown ----------
+@app.on_event("startup")
+async def on_startup():
+    global telegram_app
+    log.info("Starting Telegram application...")
+    init_db()
+    try:
+        # Verify Tesseract installation
+        version = pytesseract.get_tesseract_version()
+        log.info("Tesseract version: %s", version)
+    except Exception as e:
+        log.error("Tesseract not properly installed or not in PATH: %s", e)
+        raise RuntimeError(
+            f"Tesseract OCR is not installed or misconfigured in the Render environment (TESSERACT_CMD={TESSERACT_CMD}). "
+            "Ensure `tesseract-ocr` is installed in the Dockerfile and TESSERACT_CMD is set to /usr/bin/tesseract. "
+            "Check the README for deployment instructions."
+        )
+    
+    telegram_app = Application.builder().token(BOT_TOKEN).build()
+
+    telegram_app.add_handler(CommandHandler("battle", cmd_battle))
+    telegram_app.add_handler(CommandHandler("challenge", cmd_challenge))
+    telegram_app.add_handler(CommandHandler("confirm", cmd_confirm))
+    telegram_app.add_handler(CommandHandler("stats", cmd_stats))
+    telegram_app.add_handler(CommandHandler("cancel", cmd_cancel))
+    telegram_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handler_card_upload))
+
+    await telegram_app.initialize()
+    await telegram_app.bot.delete_webhook(drop_pending_updates=True)
+    await telegram_app.bot.set_webhook(WEBHOOK_URL)
+    log.info("Webhook set to %s", WEBHOOK_URL)
+
+    asyncio.create_task(cleanup_stale_challenges())
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    if telegram_app:
+        await telegram_app.bot.delete_webhook()
+        await telegram_app.shutdown()
+        await telegram_app.stop()
+    log.info("Bot stopped cleanly.")
+
+# ---------- Health Check ----------
+@app.get("/health")
+async def health():
+    return {"status": "ok", "service": "PFPF Battle Bot"}
+
+# ---------- Render Deployment Notes ----------
+# 1. Use the provided Dockerfile to install tesseract-ocr.
+# 2. Set environment variables in Render dashboard: BOT_TOKEN, RENDER_EXTERNAL_URL, TESSERACT_CMD=/usr/bin/tesseract.
+# 3. Include arial.ttf in the project directory for GIF generation, or rely on the default font.
+# 4. Ensure requirements.txt includes: fastapi, python-telegram-bot>=20.0, pytesseract, Pillow, imageio, uvicorn.
+# 5. If OCR fails, check Render build logs for tesseract-ocr installation issues.
+
+# ---------- End of file ----------
