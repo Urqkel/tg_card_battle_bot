@@ -366,7 +366,7 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     card["user_id"] = user.id
     uploaded_cards[user.id] = card
 
-    await update.message.reply_text(f"✅ Card received for @{username} — parsed: Power {card['power']} | Defense {card['defense']} | Rarity {card['rarity']} | Serial {card['serial']}")
+    await update.message.reply_text(f"✅ Card received for @{username} - Ready to Battle")
 
     # find whether this upload belongs to any pending challenge
     # Cases:
