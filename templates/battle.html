@@ -1,15 +1,123 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Battle Arena</title>
-  <style>
-    body { font-family: Arial, sans-serif; background: #111; color: #eee; text-align: center; }
-    h1 { margin-top: 40px; }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PFP Battle Replay</title>
+<style>
+  body {
+    margin: 0;
+    overflow: hidden;
+    background: radial-gradient(circle at center, #0a0a0a 0%, #181818 100%);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    color: white;
+    font-family: 'Segoe UI', sans-serif;
+  }
+  #arena {
+    width: 90vw;
+    height: 80vh;
+    position: relative;
+    overflow: hidden;
+    border-radius: 20px;
+    box-shadow: 0 0 40px rgba(255, 255, 255, 0.1);
+    background: linear-gradient(145deg, #202020, #0f0f0f);
+  }
+  .card {
+    width: 160px;
+    height: 220px;
+    border-radius: 16px;
+    position: absolute;
+    top: 30%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-weight: bold;
+    color: white;
+  }
+  .p1 {
+    left: 15%;
+    background: linear-gradient(145deg, #4aa3ff, #1f6ed4);
+  }
+  .p2 {
+    right: 15%;
+    background: linear-gradient(145deg, #ff4a4a, #d41f1f);
+  }
+  .hp-bar {
+    width: 160px;
+    height: 10px;
+    background: #333;
+    border-radius: 5px;
+    overflow: hidden;
+    position: absolute;
+    bottom: 10px;
+  }
+  .hp {
+    height: 100%;
+    background: limegreen;
+    transition: width 0.4s ease;
+  }
+  #result {
+    position: absolute;
+    top: 40%;
+    width: 100%;
+    text-align: center;
+    font-size: 3em;
+    font-weight: bold;
+    opacity: 0;
+    transition: opacity 0.5s ease;
+  }
+</style>
 </head>
 <body>
-  <h1>⚔️ Welcome to the Battle Arena!</h1>
-  <p>This is where your card battles will animate.</p>
+  <div id="arena">
+    <div class="card p1">
+      <div>
+        <div id="name1">{{ battle.player1 }}</div>
+        <div class="hp-bar"><div id="hp1" class="hp" style="width:100%"></div></div>
+      </div>
+    </div>
+    <div class="card p2">
+      <div>
+        <div id="name2">{{ battle.player2 }}</div>
+        <div class="hp-bar"><div id="hp2" class="hp" style="width:100%"></div></div>
+      </div>
+    </div>
+    <div id="result">Winner: {{ battle.player1 }}</div>
+  </div>
+
+<script>
+  const hp1 = document.getElementById('hp1');
+  const hp2 = document.getElementById('hp2');
+  const result = document.getElementById('result');
+  const name1 = "{{ battle.player1 }}";
+  const name2 = "{{ battle.player2 }}";
+
+  function attack(attacker, defender, damage) {
+    const target = document.getElementById(defender);
+    const newWidth = Math.max(0, parseFloat(target.style.width) - damage);
+    target.style.width = newWidth + "%";
+  }
+
+  async function battleSequence() {
+    for (let i = 0; i < 4; i++) {
+      await new Promise(r => setTimeout(r, 800));
+      attack("hp1", "hp2", Math.random() * 25);
+      await new Promise(r => setTimeout(r, 800));
+      attack("hp2", "hp1", Math.random() * 25);
+    }
+    setTimeout(() => {
+      const hp1Val = parseFloat(hp1.style.width);
+      const hp2Val = parseFloat(hp2.style.width);
+      const winner = hp1Val > hp2Val ? name1 : name2;
+      result.textContent = `🏆 Winner: ${winner}!`;
+      result.style.opacity = 1;
+    }, 1000);
+  }
+
+  window.onload = battleSequence;
+</script>
 </body>
 </html>
