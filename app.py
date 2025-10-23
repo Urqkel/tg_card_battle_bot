@@ -470,6 +470,19 @@ async def on_shutdown():
         await telegram_app.stop()
     log.info("Bot stopped cleanly.")
 
+@app.get("/webapp/battle/{battle_id}", response_class=HTMLResponse)
+async def battle_viewer(request: Request, battle_id: str):
+    # In future, you can fetch real battle data here using battle_id
+    battle_data = {
+        "player1": "AquaKnight",
+        "player2": "FlameWarden",
+        "hp1": 100,
+        "hp2": 100,
+    }
+    return templates.TemplateResponse(
+        "battle.html",
+        {"request": request, "battle": battle_data}
+    )
 # ---------- Health check ----------
 @app.get("/health")
 async def health():
