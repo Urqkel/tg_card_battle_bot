@@ -234,7 +234,7 @@ def persist_battle_record(battle_id: str, challenger_username: str, challenger_s
 async def cmd_battle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Wake/help command."""
     await update.message.reply_text(
-        "⚔️ PFPF Battle Bot\n"
+        "⚔️ PFP Battle Bot\n"
         "Use /challenge @username to challenge someone.\n"
         "Then both players upload their card images in the chat (photo or file)."
     )
@@ -253,7 +253,7 @@ async def cmd_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"⚔️ @{challenger.username} has challenged @{opponent_username}!\n"
-        "Both players: upload your card images (photo or document) in this chat. Uploads can be in any order."
+        "Both players: upload your battle card image in this chat. Uploads can be in any order."
     )
 
 
