@@ -6,7 +6,10 @@ import random
 import logging
 from typing import Optional
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+
+templates = Jinja2Templates(directory="templates")
 from telegram import Update, InputFile
 from telegram.ext import (
     Application,
