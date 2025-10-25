@@ -236,7 +236,7 @@ async def cmd_battle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "⚔️ PFP Battle Bot\n"
         "Use /challenge @username to challenge someone.\n"
-        "Then both players upload their card images in the chat (photo or file)."
+        "Then both players upload their PFP battle card in the chat (photo or file)."
     )
 
 
@@ -305,7 +305,7 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     uploaded_cards[user_id] = card
 
     await update.message.reply_text(
-        f"✅ @{username}'s card received — Power {card['power']} | Defense {card['defense']} | Rarity {card['rarity']} | Serial {card['serial']}"
+        f"✅ @{username}'s card received — Ready to Battle"
     )
 
     # Determine if this upload completes a pending challenge
@@ -423,16 +423,23 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ---------- FastAPI routes ----------
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "PFPF Battle Bot"}
+    return {"status": "ok", "service": "PFP Battle Bot"}
 
 
 @app.get("/battle/{battle_id}", response_class=HTMLResponse)
 async def view_battle(request: Request, battle_id: str):
-    path = f"battles/{battle_id}.html"
-    if not os.path.exists(path):
+    battle_path = f"battles/{battle_id}.json"
+    if not os.path.exists(battle_path):
         return HTMLResponse("<h3>Battle not found.</h3>", status_code=404)
-    # return static file content
-    return FileResponse(path, media_type="text/html")
+
+    # load battle data
+    with open(battle_path, "r") as f:
+        battle_data = json.load(f)
+
+    return templates.TemplateResponse(
+        "battle.html",  # this is your template in /templates/
+        {"request": request, "battle": battle_data}
+    )
 
 
 @app.post(WEBHOOK_PATH)
