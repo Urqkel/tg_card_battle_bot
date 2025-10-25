@@ -206,7 +206,7 @@ def save_battle_html(battle_id: str, replay_url: str = None):
     os.makedirs("battles", exist_ok=True)
 
     # Default to placeholder image if no replay available
-    image_src = replay_url if replay_url else "/static/battle_placeholder.png"
+    image_src = replay_url if replay_url else "/static/battle_placeholder.mp4"
 
     battle_html = f"""
     <!DOCTYPE html>
@@ -461,12 +461,32 @@ async def root():
     return {"status": "ok", "service": "PFP Battle Bot"}
 
 
-@app.get("/battle/{battle_id}")
-async def battle_page(battle_id: str):
-    file_path = f"battles/{battle_id}.html"
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Battle not found")
-    return FileResponse(file_path, media_type="text/html")
+@app.get("/battle/{battle_id}", response_class=HTMLResponse)
+async def battle_page(request: Request, battle_id: str):
+    battle_file = f"battles/{battle_id}.html"
+    if os.path.exists(battle_file):
+        return FileResponse(battle_file, media_type="text/html")
+    
+    # fallback placeholder
+    return templates.TemplateResponse(
+        "battle.html",  # same template as real battles
+        {
+            "request": request,
+            "battle": {
+                "card1_name": "Placeholder 1",
+                "card2_name": "Placeholder 2",
+                "card1_stats": {"power": 50, "defense": 50, "rarity": "Common", "serial": 1000},
+                "card2_stats": {"power": 50, "defense": 50, "rarity": "Common", "serial": 1000},
+                "hp1_start": 100,
+                "hp2_start": 100,
+                "hp1_end": 50,
+                "hp2_end": 50,
+                "winner_name": "TBD",
+                "battle_id": battle_id,
+                "replay_media": "/static/battle_placeholder.mp4"  # or .gif
+            }
+        }
+    )
 
 
 @app.get("/test_battle")
@@ -494,7 +514,7 @@ async def test_battle(request: Request):
     </head>
     <body>
         <h1>Demo Battle Replay</h1>
-        <img src="/static/battle_placeholder.png" alt="Battle Placeholder">
+        <img src="/static/battle_placeholder.mp4" alt="Battle Placeholder">
         <p>Static test loaded successfully!</p>
     </body>
     </html>
