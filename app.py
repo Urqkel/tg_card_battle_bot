@@ -461,28 +461,12 @@ async def root():
     return {"status": "ok", "service": "PFP Battle Bot"}
 
 
-@app.get("/battle/{battle_id}", response_class=HTMLResponse)
-async def view_battle(request: Request, battle_id: str):
-    """
-    Serve saved battle HTMLs from the /battles directory.
-    Falls back to demo placeholder if not found.
-    """
-    battle_path = f"battles/{battle_id}.html"
-
-    if not os.path.exists(battle_path):
-        # Fallback: show demo placeholder
-        return templates.TemplateResponse(
-            "battle.html",
-            {
-                "request": request,
-                "battle_id": battle_id,
-                "placeholder_url": "/static/battle_placeholder.png",
-                "is_placeholder": True,
-            },
-        )
-
-    # If a saved battle file exists, serve it directly
-    return FileResponse(battle_path, media_type="text/html")
+@app.get("/battle/{battle_id}")
+async def battle_page(battle_id: str):
+    file_path = f"battles/{battle_id}.html"
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Battle not found")
+    return FileResponse(file_path, media_type="text/html")
 
 
 @app.get("/test_battle")
