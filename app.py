@@ -41,7 +41,7 @@ WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
 
 # ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("pfpf-battle-bot")
+log = logging.getLogger("pfp-battle-bot")
 
 # ---------- FastAPI + Templates ----------
 app = FastAPI()
