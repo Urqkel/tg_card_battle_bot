@@ -198,17 +198,50 @@ def simulate_battle(hp1: int, hp2: int, power1: int, power2: int):
 
 
 # ---------- Replay HTML generation ----------
-def save_battle_html(battle_id: str, context: dict) -> str:
+def save_battle_html(battle_id: str, replay_url: str = None):
     """
-    Renders templates/battle.html using Jinja2Templates and writes to battles/{id}.html
-    Returns the path.
+    Save a battle HTML page that mirrors the working test_battle demo.
+    If replay_url is provided, it will embed that; otherwise uses placeholder.
     """
-    template = templates.get_template("battle.html")
-    rendered = template.render(context)
-    path = f"battles/{battle_id}.html"
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(rendered)
-    return path
+    os.makedirs("battles", exist_ok=True)
+
+    # Default to placeholder image if no replay available
+    image_src = replay_url if replay_url else "/static/battle_placeholder.png"
+
+    battle_html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Battle {battle_id}</title>
+        <style>
+            body {{ 
+                background-color: #0d0d0d; 
+                color: white; 
+                text-align: center; 
+                font-family: Arial, sans-serif; 
+            }}
+            img {{ 
+                width: 400px; 
+                height: auto; 
+                margin-top: 50px; 
+                border-radius: 12px;
+                box-shadow: 0 0 20px rgba(255,255,255,0.3);
+            }}
+        </style>
+    </head>
+    <body>
+        <h1>Battle Replay: {battle_id}</h1>
+        <img src="{image_src}" alt="Battle Replay">
+        <p>{'Battle replay generated!' if replay_url else 'Static placeholder shown until replay is ready.'}</p>
+    </body>
+    </html>
+    """
+
+    file_path = f"battles/{battle_id}.html"
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(battle_html)
+
+    return file_path
 
 
 def persist_battle_record(battle_id: str, challenger_username: str, challenger_stats: dict,
