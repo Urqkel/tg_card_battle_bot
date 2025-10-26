@@ -340,7 +340,7 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     uploaded_cards[user_id] = card
 
     await update.message.reply_text(
-        f"✅ @{username}'s card received — Calculating HP - Power {card['power']} | Defense {card['defense']} | Rarity {card['rarity']} | Serial {card['serial']}""
+        f"✅ @{username}'s card received — Calculating HP - Power {card['power']} | Defense {card['defense']} | Rarity {card['rarity']} | Serial {card['serial']}"
     )
 
     # Determine if this upload completes a pending challenge
