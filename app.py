@@ -340,7 +340,7 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     uploaded_cards[user_id] = card
 
     await update.message.reply_text(
-        f"✅ @{username}'s card received — Calculating HP - Power {card['power']} | Defense {card['defense']} | Rarity {card['rarity']} | Serial {card['serial']}"
+        f"✅ @{username}'s card received — Calculating HP"
     )
 
     # Determine if this upload completes a pending challenge
@@ -463,30 +463,62 @@ async def root():
 
 @app.get("/battle/{battle_id}", response_class=HTMLResponse)
 async def battle_page(request: Request, battle_id: str):
+    """Serve existing battle replay or show styled placeholder."""
     battle_file = f"battles/{battle_id}.html"
     if os.path.exists(battle_file):
         return FileResponse(battle_file, media_type="text/html")
-    
-    # fallback placeholder
-    return templates.TemplateResponse(
-        "battle.html",  # same template as real battles
-        {
-            "request": request,
-            "battle": {
-                "card1_name": "Placeholder 1",
-                "card2_name": "Placeholder 2",
-                "card1_stats": {"power": 50, "defense": 50, "rarity": "Common", "serial": 1000},
-                "card2_stats": {"power": 50, "defense": 50, "rarity": "Common", "serial": 1000},
-                "hp1_start": 100,
-                "hp2_start": 100,
-                "hp1_end": 50,
-                "hp2_end": 50,
-                "winner_name": "TBD",
-                "battle_id": battle_id,
-                "replay_media": "/static/battle_placeholder.mp4"  # or .gif
-            }
-        }
-    )
+
+    # Fallback placeholder — detect available static media
+    placeholder_mp4 = "static/battle_placeholder.mp4"
+    placeholder_gif = "static/battle_placeholder.gif"
+    placeholder_png = "static/battle_placeholder.png"
+
+    if os.path.exists(placeholder_mp4):
+        replay_media = f"/{placeholder_mp4}"
+        media_type = "video"
+    elif os.path.exists(placeholder_gif):
+        replay_media = f"/{placeholder_gif}"
+        media_type = "image"
+    elif os.path.exists(placeholder_png):
+        replay_media = f"/{placeholder_png}"
+        media_type = "image"
+    else:
+        # default fallback text
+        replay_media = None
+        media_type = "none"
+
+    # Build inline HTML so it looks like the final replay page
+    content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Battle {battle_id}</title>
+        <style>
+            body {{
+                background-color: #0d0d0d;
+                color: white;
+                text-align: center;
+                font-family: Arial, sans-serif;
+            }}
+            .media {{
+                width: 400px;
+                margin-top: 50px;
+                border-radius: 12px;
+                box-shadow: 0 0 20px rgba(255,255,255,0.3);
+            }}
+            p {{ opacity: 0.8; margin-top: 10px; }}
+        </style>
+    </head>
+    <body>
+        <h1>Battle Replay: {battle_id}</h1>
+        {f'<video class="media" autoplay loop muted playsinline><source src="{replay_media}" type="video/mp4"></video>' if media_type == 'video' else ''}
+        {f'<img class="media" src="{replay_media}" alt="Battle Placeholder">' if media_type == 'image' else ''}
+        {f'<p>Static placeholder shown until replay is ready.</p>' if media_type != 'none' else '<p>No placeholder file found.</p>'}
+    </body>
+    </html>
+    """
+
+    return HTMLResponse(content=content)
 
 
 @app.get("/test_battle")
