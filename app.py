@@ -6,6 +6,7 @@ import json
 import sqlite3
 import logging
 import random
+import base64
 from datetime import datetime
 from typing import Optional
 
@@ -23,19 +24,21 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from PIL import Image, ImageDraw, ImageFont
-import easyocr
-import numpy as np
+from PIL import Image
+import anthropic
 
 # ---------- Config ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")  # Add this to Render env vars
 PORT = int(os.getenv("PORT", 10000))
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing in environment.")
 if not RENDER_EXTERNAL_URL:
     raise RuntimeError("RENDER_EXTERNAL_URL missing in environment.")
+if not ANTHROPIC_API_KEY:
+    raise RuntimeError("ANTHROPIC_API_KEY missing in environment. Get one at https://console.anthropic.com")
 
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
@@ -81,84 +84,106 @@ init_db()
 pending_challenges: dict[int, str] = {}
 uploaded_cards: dict[int, dict] = {}
 
-# ---------- OCR / Parsing ----------
+# ---------- Claude Vision OCR ----------
 RARITY_BONUS = {"common": 0, "rare": 20, "ultrarare": 40, "ultra-rare": 40, "legendary": 60}
 
-# Initialize EasyOCR reader once at startup
-log.info("Initializing EasyOCR reader...")
-reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-log.info("EasyOCR reader initialized")
+# Initialize Anthropic client
+claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-def ocr_text_from_bytes(file_bytes: bytes) -> str:
-    """Return OCR text using EasyOCR; raises if image unreadable."""
-    image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-    # Convert PIL to numpy array for easyocr
-    img_array = np.array(image)
-    # Extract text
-    results = reader.readtext(img_array)
-    # Combine all detected text
-    text = ' '.join([result[1] for result in results])
-    return text
+def analyze_card_with_claude(file_bytes: bytes) -> dict:
+    """
+    Use Claude's vision API to extract card stats.
+    Much more accurate than traditional OCR for styled cards!
+    """
+    try:
+        # Convert to base64
+        base64_image = base64.standard_b64encode(file_bytes).decode("utf-8")
+        
+        # Determine image type
+        image = Image.open(io.BytesIO(file_bytes))
+        image_format = image.format.lower() if image.format else "jpeg"
+        media_type = f"image/{image_format}" if image_format in ["jpeg", "png", "gif", "webp"] else "image/jpeg"
+        
+        # Ask Claude to extract the stats
+        message = claude_client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": base64_image,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": """This is a PFP battle card. Please extract the following stats from the card:
 
-def parse_stats_from_text(text: str) -> dict:
-    lower = text.lower()
-    
-    # rarity
-    rarity = "Common"
-    for key in ["legendary", "ultra-rare", "ultra rare", "ultrarare", "rare", "common"]:
-        if key in lower:
-            if "ultra" in key:
-                rarity = "Ultra-Rare"
-            else:
-                rarity = key.capitalize()
-            break
-    
-    nums = [int(n) for n in re.findall(r"\b([0-9]{1,4})\b", text)]
-    
-    # power
-    power = None
-    m = re.search(r"power[:\s]*([0-9]{1,4})", lower)
-    if m:
-        power = int(m.group(1))
-    else:
-        m2 = re.search(r"(attack|atk)[:\s]*([0-9]{1,4})", lower)
-        if m2:
-            power = int(m2.group(2))
-    
-    # defense
-    defense = None
-    m = re.search(r"defen(?:se|c)e?[:\s]*([0-9]{1,4})", lower)
-    if m:
-        defense = int(m.group(1))
-    else:
-        m2 = re.search(r"\bdef[:\s]*([0-9]{1,4})\b", lower)
-        if m2:
-            defense = int(m2.group(1))
-    
-    # serial
-    serial = None
-    m = re.search(r"serial[:\s#]*([0-9]{1,4})", lower)
-    if m:
-        serial = int(m.group(1))
-    else:
-        m2 = re.search(r"#\s*([0-9]{1,4})", text)
-        if m2:
-            serial = int(m2.group(1))
-        else:
-            m3 = re.search(r"s\/n[:\s]*([0-9]{1,4})", lower)
-            if m3:
-                serial = int(m3.group(1))
-    
-    if power is None:
-        power = nums[0] if len(nums) >= 1 else 50
-    if defense is None:
-        defense = nums[1] if len(nums) >= 2 else 50
-    if serial is None:
-        serial = min(nums) if nums else 1000
-    
-    serial = max(1, min(int(serial), 1999))
-    
-    return {"power": int(power), "defense": int(defense), "rarity": rarity, "serial": int(serial)}
+1. Power (attack stat, usually a number between 1-200)
+2. Defense (defense stat, usually a number between 1-200)
+3. Rarity (Common, Rare, Ultra-Rare, or Legendary)
+4. Serial Number (usually marked as Serial, S/N, or #number, typically 1-1999)
+
+Return ONLY a JSON object in this exact format with no other text:
+{
+  "power": <number>,
+  "defense": <number>,
+  "rarity": "<Common|Rare|Ultra-Rare|Legendary>",
+  "serial": <number>
+}
+
+If you cannot find a stat clearly, use these defaults:
+- Power: 50
+- Defense: 50
+- Rarity: "Common"
+- Serial: 1000"""
+                        }
+                    ],
+                }
+            ],
+        )
+        
+        # Extract response
+        response_text = message.content[0].text.strip()
+        
+        # Parse JSON (handle potential markdown code blocks)
+        json_text = response_text
+        if "```json" in response_text:
+            json_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            json_text = response_text.split("```")[1].split("```")[0].strip()
+        
+        stats = json.loads(json_text)
+        
+        # Validate and normalize
+        power = max(1, min(int(stats.get("power", 50)), 200))
+        defense = max(1, min(int(stats.get("defense", 50)), 200))
+        rarity = stats.get("rarity", "Common")
+        serial = max(1, min(int(stats.get("serial", 1000)), 1999))
+        
+        log.info(f"Claude extracted stats: power={power}, defense={defense}, rarity={rarity}, serial={serial}")
+        
+        return {
+            "power": power,
+            "defense": defense,
+            "rarity": rarity,
+            "serial": serial
+        }
+        
+    except Exception as e:
+        log.exception(f"Claude Vision API error: {e}")
+        # Fallback to defaults
+        return {
+            "power": 50,
+            "defense": 50,
+            "rarity": "Common",
+            "serial": 1000
+        }
 
 # ---------- HP calculation ----------
 def calculate_hp(card: dict) -> int:
@@ -204,11 +229,9 @@ def simulate_battle(hp1: int, hp2: int, power1: int, power2: int):
     
     return max(0, hp1), max(0, hp2), battle_log
 
-# ---------- IMPROVED: Battle HTML with actual visualization ----------
+# ---------- Battle HTML generation ----------
 def save_battle_html(battle_id: str, battle_context: dict):
-    """
-    Generate an animated battle replay HTML page using the battle context data.
-    """
+    """Generate an animated battle replay HTML page."""
     os.makedirs("battles", exist_ok=True)
     
     card1_name = battle_context["card1_name"]
@@ -224,7 +247,7 @@ def save_battle_html(battle_id: str, battle_context: dict):
     
     # Generate battle log HTML
     battle_log_html = ""
-    for entry in battle_log[:20]:  # Show first 20 rounds
+    for entry in battle_log[:20]:
         attacker = card1_name if entry["attacker"] == 1 else card2_name
         battle_log_html += f"""
             <div class="log-entry">
@@ -487,7 +510,6 @@ def save_battle_html(battle_id: str, battle_context: dict):
         </div>
         
         <script>
-            // Animate HP bars
             setTimeout(() => {{
                 const hp1Percent = ({hp1_end} / {hp1_start}) * 100;
                 const hp2Percent = ({hp2_end} / {hp2_start}) * 100;
@@ -495,7 +517,6 @@ def save_battle_html(battle_id: str, battle_context: dict):
                 document.getElementById('hp1-bar').style.width = hp1Percent + '%';
                 document.getElementById('hp2-bar').style.width = hp2Percent + '%';
                 
-                // Animate HP values
                 animateValue('hp1-value', {hp1_start}, {hp1_end}, 2000);
                 animateValue('hp2-value', {hp2_start}, {hp2_end}, 2000);
             }}, 500);
@@ -552,9 +573,9 @@ async def cmd_battle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚔️ PFP Battle Bot\n\n"
         "Commands:\n"
         "/challenge @username - Challenge someone to battle\n"
-        "/mystats - View your uploaded card stats\n"
-        "/leaderboard - View top battlers\n\n"
-        "After challenging, both players upload their PFP battle card (photo or file)."
+        "/mystats - View your uploaded card stats\n\n"
+        "After challenging, both players upload their PFP battle card (photo or file).\n"
+        "🤖 Powered by Claude AI for accurate card reading!"
     )
 
 async def cmd_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -565,7 +586,6 @@ async def cmd_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     challenger = update.effective_user
     opponent_username = context.args[0].lstrip("@").strip()
     
-    # Check if challenger is challenging themselves
     if challenger.username and challenger.username.lower() == opponent_username.lower():
         await update.message.reply_text("❌ You can't challenge yourself!")
         return
@@ -580,7 +600,6 @@ async def cmd_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user's currently uploaded card stats"""
     user_id = update.effective_user.id
     
     if user_id not in uploaded_cards:
@@ -631,13 +650,11 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception:
         log.exception("Failed saving card to %s", save_path)
     
-    # OCR + parse
-    try:
-        ocr_text = ocr_text_from_bytes(file_bytes)
-        parsed = parse_stats_from_text(ocr_text)
-    except Exception as e:
-        log.exception("OCR failure for @%s: %s", username, e)
-        parsed = {"power": 50, "defense": 50, "rarity": "Common", "serial": 1000}
+    # Send processing message
+    processing_msg = await update.message.reply_text("🤖 Analyzing your card with AI...")
+    
+    # Use Claude Vision to analyze the card
+    parsed = analyze_card_with_claude(bytes(file_bytes))
     
     card = {
         "username": username,
@@ -652,8 +669,8 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     uploaded_cards[user_id] = card
     hp = calculate_hp(card)
     
-    await update.message.reply_text(
-        f"✅ @{username}'s card received!\n"
+    await processing_msg.edit_text(
+        f"✅ @{username}'s card analyzed!\n"
         f"⚡ Power: {card['power']} | 🛡️ Defense: {card['defense']}\n"
         f"✨ {card['rarity']} | 🎫 Serial #{card['serial']}\n"
         f"❤️ HP: {hp}"
@@ -662,7 +679,6 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Check for battle trigger
     triggered_pair = None
     
-    # Check if uploader is challenger
     if user_id in pending_challenges:
         opponent_username = pending_challenges[user_id].lower()
         opponent_id = next(
@@ -672,7 +688,6 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         if opponent_id:
             triggered_pair = (user_id, opponent_id)
     
-    # Check if uploader is opponent
     if not triggered_pair:
         for challenger_id, opponent_username in pending_challenges.items():
             if username == opponent_username.lower():
@@ -690,16 +705,13 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             log.warning("Missing card data for battle")
             return
         
-        # Compute HPs
         hp1_start = calculate_hp(card1)
         hp2_start = calculate_hp(card2)
         
-        # Simulate battle with log
         hp1_end, hp2_end, battle_log = simulate_battle(
             hp1_start, hp2_start, card1["power"], card2["power"]
         )
         
-        # Determine winner
         if hp1_end > hp2_end:
             winner = card1["username"]
         elif hp2_end > hp1_end:
@@ -707,7 +719,6 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             winner = None
         
-        # Create battle replay
         battle_id = str(uuid.uuid4())
         battle_context = {
             "card1_name": card1["username"],
@@ -735,7 +746,6 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         html_path = save_battle_html(battle_id, battle_context)
         
-        # Save to database
         persist_battle_record(
             battle_id,
             card1["username"],
@@ -746,7 +756,6 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             html_path,
         )
         
-        # Send results
         replay_url = f"{RENDER_EXTERNAL_URL}/battle/{battle_id}"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎬 View Battle Replay", url=replay_url)]
@@ -765,22 +774,17 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         await update.message.reply_text(summary_text, reply_markup=keyboard)
         
-        # Cleanup
         uploaded_cards.pop(challenger_id, None)
         uploaded_cards.pop(opponent_id, None)
         pending_challenges.pop(challenger_id, None)
     
     else:
-        # FIXED: Improved waiting message logic
         waiting_for = None
         if user_id in pending_challenges:
-            # Uploader is challenger waiting for opponent
             waiting_for = f"@{pending_challenges[user_id]}"
         else:
-            # Check if uploader is the opponent in someone's challenge
             for challenger_id, opponent_username in pending_challenges.items():
                 if username == opponent_username.lower():
-                    # Found the challenge, now get challenger's username
                     challenger_card = uploaded_cards.get(challenger_id)
                     if challenger_card:
                         waiting_for = f"@{challenger_card['username']}"
@@ -800,7 +804,7 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ---------- FastAPI routes ----------
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "PFP Battle Bot"}
+    return {"status": "ok", "service": "PFP Battle Bot", "ocr": "Claude Vision API"}
 
 @app.get("/battle/{battle_id}", response_class=HTMLResponse)
 async def battle_page(request: Request, battle_id: str):
@@ -808,7 +812,6 @@ async def battle_page(request: Request, battle_id: str):
     if os.path.exists(battle_file):
         return FileResponse(battle_file, media_type="text/html")
     
-    # Battle not found
     return HTMLResponse(content="""
         <!DOCTYPE html>
         <html>
@@ -845,7 +848,7 @@ telegram_app: Optional[Application] = None
 @app.on_event("startup")
 async def on_startup():
     global telegram_app
-    log.info("Starting Telegram Application...")
+    log.info("Starting Telegram Application with Claude Vision...")
     
     telegram_app = Application.builder().token(BOT_TOKEN).build()
     
