@@ -25,6 +25,7 @@ from telegram.ext import (
 )
 
 from PIL import Image
+import asyncio
 import anthropic
 
 # ---------- Config ----------
@@ -87,26 +88,35 @@ uploaded_cards: dict[int, dict] = {}
 # ---------- Claude Vision OCR ----------
 RARITY_BONUS = {"common": 0, "rare": 20, "ultrarare": 40, "ultra-rare": 40, "legendary": 60}
 
-# Initialize Anthropic client
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+# Use the ASYNC client instead
+claude_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-def analyze_card_with_claude(file_bytes: bytes) -> dict:
+
+async def analyze_card_with_claude(file_bytes: bytes) -> dict:
     """
     Use Claude's vision API to extract card stats.
-    Much more accurate than traditional OCR for styled cards!
+    Now async so it doesn't block the event loop!
     """
     try:
         # Convert to base64
         base64_image = base64.standard_b64encode(file_bytes).decode("utf-8")
-        
+
         # Determine image type
         image = Image.open(io.BytesIO(file_bytes))
         image_format = image.format.lower() if image.format else "jpeg"
-        media_type = f"image/{image_format}" if image_format in ["jpeg", "png", "gif", "webp"] else "image/jpeg"
-        
-        # Ask Claude to extract the stats
-        message = claude_client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+        if image_format in ["jpeg", "jpg", "png", "gif", "webp"]:
+            media_type = f"image/{image_format}"
+        else:
+            # Convert unsupported formats to PNG
+            buf = io.BytesIO()
+            image.save(buf, format="PNG")
+            file_bytes = buf.getvalue()
+            base64_image = base64.standard_b64encode(file_bytes).decode("utf-8")
+            media_type = "image/png"
+
+        # Use the ASYNC create method
+        message = await claude_client.messages.create(
+            model="claude-sonnet-4-20250514",
             max_tokens=1024,
             messages=[
                 {
@@ -147,43 +157,42 @@ If you cannot find a stat clearly, use these defaults:
                 }
             ],
         )
-        
-        # Extract response
+
         response_text = message.content[0].text.strip()
+        log.info(f"Claude raw response: {response_text}")
         
-        # Parse JSON (handle potential markdown code blocks)
+        # Parse JSON
         json_text = response_text
         if "```json" in response_text:
             json_text = response_text.split("```json")[1].split("```")[0].strip()
         elif "```" in response_text:
             json_text = response_text.split("```")[1].split("```")[0].strip()
-        
+
         stats = json.loads(json_text)
-        
-        # Validate and normalize
+
         power = max(1, min(int(stats.get("power", 50)), 200))
         defense = max(1, min(int(stats.get("defense", 50)), 200))
         rarity = stats.get("rarity", "Common")
         serial = max(1, min(int(stats.get("serial", 1000)), 1999))
-        
-        log.info(f"Claude extracted stats: power={power}, defense={defense}, rarity={rarity}, serial={serial}")
-        
+
+        log.info(f"Claude extracted: power={power}, defense={defense}, rarity={rarity}, serial={serial}")
+
         return {
             "power": power,
             "defense": defense,
             "rarity": rarity,
             "serial": serial
         }
-        
+
+    except json.JSONDecodeError as e:
+        log.error(f"Failed to parse Claude response as JSON: {e}")
+        return {"power": 50, "defense": 50, "rarity": "Common", "serial": 1000}
+    except anthropic.APIError as e:
+        log.error(f"Anthropic API error: {e}")
+        return {"power": 50, "defense": 50, "rarity": "Common", "serial": 1000}
     except Exception as e:
-        log.exception(f"Claude Vision API error: {e}")
-        # Fallback to defaults
-        return {
-            "power": 50,
-            "defense": 50,
-            "rarity": "Common",
-            "serial": 1000
-        }
+        log.exception(f"Unexpected error in Claude analysis: {e}")
+        return {"power": 50, "defense": 50, "rarity": "Common", "serial": 1000}
 
 # ---------- HP calculation ----------
 def calculate_hp(card: dict) -> int:
@@ -628,53 +637,62 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = update.effective_user
     username = (user.username or f"user{user.id}").lower()
     user_id = user.id
-    
-    # Get file bytes
-    file_obj = None
-    if update.message.photo:
-        file_obj = await update.message.photo[-1].get_file()
-    elif update.message.document:
-        file_obj = await update.message.document.get_file()
-    else:
-        await update.message.reply_text("Please upload an image (photo or file).")
-        return
-    
-    file_bytes = await file_obj.download_as_bytearray()
-    
-    # Save image
-    os.makedirs("cards", exist_ok=True)
-    save_path = f"cards/{username}.png"
+
     try:
+        # Get file bytes
+        file_obj = None
+        if update.message.photo:
+            file_obj = await update.message.photo[-1].get_file()
+        elif update.message.document:
+            mime = update.message.document.mime_type or ""
+            if not mime.startswith("image/"):
+                await update.message.reply_text(
+                    "⚠️ Please upload an image file (PNG, JPG, etc)."
+                )
+                return
+            file_obj = await update.message.document.get_file()
+        else:
+            await update.message.reply_text("Please upload an image.")
+            return
+
+        file_bytes = await file_obj.download_as_bytearray()
+
+        if len(file_bytes) == 0:
+            await update.message.reply_text("⚠️ Empty file received. Try again.")
+            return
+
+        # Save image
+        os.makedirs("cards", exist_ok=True)
+        save_path = f"cards/{username}.png"
         with open(save_path, "wb") as f:
             f.write(file_bytes)
-    except Exception:
-        log.exception("Failed saving card to %s", save_path)
-    
-    # Send processing message
-    processing_msg = await update.message.reply_text("🤖 Analyzing your card with AI...")
-    
-    # Use Claude Vision to analyze the card
-    parsed = analyze_card_with_claude(bytes(file_bytes))
-    
-    card = {
-        "username": username,
-        "user_id": user_id,
-        "path": save_path,
-        "power": int(parsed["power"]),
-        "defense": int(parsed["defense"]),
-        "rarity": parsed["rarity"],
-        "serial": int(parsed["serial"]),
-    }
-    
-    uploaded_cards[user_id] = card
-    hp = calculate_hp(card)
-    
-    await processing_msg.edit_text(
-        f"✅ @{username}'s card analyzed!\n"
-        f"⚡ Power: {card['power']} | 🛡️ Defense: {card['defense']}\n"
-        f"✨ {card['rarity']} | 🎫 Serial #{card['serial']}\n"
-        f"❤️ HP: {hp}"
-    )
+
+        processing_msg = await update.message.reply_text(
+            "🤖 Analyzing your card with AI..."
+        )
+
+        # AWAIT the async Claude call
+        parsed = await analyze_card_with_claude(bytes(file_bytes))
+
+        card = {
+            "username": username,
+            "user_id": user_id,
+            "path": save_path,
+            "power": int(parsed["power"]),
+            "defense": int(parsed["defense"]),
+            "rarity": parsed["rarity"],
+            "serial": int(parsed["serial"]),
+        }
+
+        uploaded_cards[user_id] = card
+        hp = calculate_hp(card)
+
+        await processing_msg.edit_text(
+            f"✅ @{username}'s card analyzed!\n"
+            f"⚡ Power: {card['power']} | 🛡️ Defense: {card['defense']}\n"
+            f"✨ {card['rarity']} | 🎫 Serial #{card['serial']}\n"
+            f"❤️ HP: {hp}"
+        )
     
     # Check for battle trigger
     triggered_pair = None
@@ -801,6 +819,15 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "✅ Card uploaded! Use /challenge @username to start a battle."
             )
 
+ except Exception as e:  # <-- THIS catches anything that slipped through
+        log.exception(f"Error in card upload handler: {e}")
+        try:
+            await update.message.reply_text(
+                "❌ Something went wrong processing your card. Please try again."
+            )
+        except Exception:
+            pass
+
 # ---------- FastAPI routes ----------
 @app.get("/")
 async def root():
@@ -866,9 +893,11 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     if telegram_app:
-        await telegram_app.bot.delete_webhook()
+        try:
+            await telegram_app.bot.delete_webhook()
+        except Exception:
+            pass
         await telegram_app.shutdown()
-        await telegram_app.stop()
     log.info("Bot stopped cleanly.")
 
 if __name__ == "__main__":
