@@ -24,7 +24,8 @@ from telegram.ext import (
 )
 
 from PIL import Image, ImageDraw, ImageFont
-import pytesseract
+import easyocr
+import numpy as np
 
 # ---------- Config ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -83,9 +84,20 @@ uploaded_cards: dict[int, dict] = {}
 # ---------- OCR / Parsing ----------
 RARITY_BONUS = {"common": 0, "rare": 20, "ultrarare": 40, "ultra-rare": 40, "legendary": 60}
 
+# Initialize EasyOCR reader once at startup
+log.info("Initializing EasyOCR reader...")
+reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+log.info("EasyOCR reader initialized")
+
 def ocr_text_from_bytes(file_bytes: bytes) -> str:
+    """Return OCR text using EasyOCR; raises if image unreadable."""
     image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-    text = pytesseract.image_to_string(image)
+    # Convert PIL to numpy array for easyocr
+    img_array = np.array(image)
+    # Extract text
+    results = reader.readtext(img_array)
+    # Combine all detected text
+    text = ' '.join([result[1] for result in results])
     return text
 
 def parse_stats_from_text(text: str) -> dict:
