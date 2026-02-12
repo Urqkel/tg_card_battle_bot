@@ -25,7 +25,6 @@ from telegram.ext import (
 )
 
 from PIL import Image
-import asyncio
 import anthropic
 
 # ---------- Config ----------
@@ -88,35 +87,26 @@ uploaded_cards: dict[int, dict] = {}
 # ---------- Claude Vision OCR ----------
 RARITY_BONUS = {"common": 0, "rare": 20, "ultrarare": 40, "ultra-rare": 40, "legendary": 60}
 
-# Use the ASYNC client instead
-claude_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+# Initialize Anthropic client
+claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-
-async def analyze_card_with_claude(file_bytes: bytes) -> dict:
+def analyze_card_with_claude(file_bytes: bytes) -> dict:
     """
     Use Claude's vision API to extract card stats.
-    Now async so it doesn't block the event loop!
+    Much more accurate than traditional OCR for styled cards!
     """
     try:
         # Convert to base64
         base64_image = base64.standard_b64encode(file_bytes).decode("utf-8")
-
+        
         # Determine image type
         image = Image.open(io.BytesIO(file_bytes))
         image_format = image.format.lower() if image.format else "jpeg"
-        if image_format in ["jpeg", "jpg", "png", "gif", "webp"]:
-            media_type = f"image/{image_format}"
-        else:
-            # Convert unsupported formats to PNG
-            buf = io.BytesIO()
-            image.save(buf, format="PNG")
-            file_bytes = buf.getvalue()
-            base64_image = base64.standard_b64encode(file_bytes).decode("utf-8")
-            media_type = "image/png"
-
-        # Use the ASYNC create method
-        message = await claude_client.messages.create(
-            model="claude-sonnet-4-20250514",
+        media_type = f"image/{image_format}" if image_format in ["jpeg", "png", "gif", "webp"] else "image/jpeg"
+        
+        # Ask Claude to extract the stats
+        message = claude_client.messages.create(
+            model="claude-3-5-sonnet-20241022",
             max_tokens=1024,
             messages=[
                 {
@@ -157,42 +147,43 @@ If you cannot find a stat clearly, use these defaults:
                 }
             ],
         )
-
-        response_text = message.content[0].text.strip()
-        log.info(f"Claude raw response: {response_text}")
         
-        # Parse JSON
+        # Extract response
+        response_text = message.content[0].text.strip()
+        
+        # Parse JSON (handle potential markdown code blocks)
         json_text = response_text
         if "```json" in response_text:
             json_text = response_text.split("```json")[1].split("```")[0].strip()
         elif "```" in response_text:
             json_text = response_text.split("```")[1].split("```")[0].strip()
-
+        
         stats = json.loads(json_text)
-
+        
+        # Validate and normalize
         power = max(1, min(int(stats.get("power", 50)), 200))
         defense = max(1, min(int(stats.get("defense", 50)), 200))
         rarity = stats.get("rarity", "Common")
         serial = max(1, min(int(stats.get("serial", 1000)), 1999))
-
-        log.info(f"Claude extracted: power={power}, defense={defense}, rarity={rarity}, serial={serial}")
-
+        
+        log.info(f"Claude extracted stats: power={power}, defense={defense}, rarity={rarity}, serial={serial}")
+        
         return {
             "power": power,
             "defense": defense,
             "rarity": rarity,
             "serial": serial
         }
-
-    except json.JSONDecodeError as e:
-        log.error(f"Failed to parse Claude response as JSON: {e}")
-        return {"power": 50, "defense": 50, "rarity": "Common", "serial": 1000}
-    except anthropic.APIError as e:
-        log.error(f"Anthropic API error: {e}")
-        return {"power": 50, "defense": 50, "rarity": "Common", "serial": 1000}
+        
     except Exception as e:
-        log.exception(f"Unexpected error in Claude analysis: {e}")
-        return {"power": 50, "defense": 50, "rarity": "Common", "serial": 1000}
+        log.exception(f"Claude Vision API error: {e}")
+        # Fallback to defaults
+        return {
+            "power": 50,
+            "defense": 50,
+            "rarity": "Common",
+            "serial": 1000
+        }
 
 # ---------- HP calculation ----------
 def calculate_hp(card: dict) -> int:
@@ -588,319 +579,4 @@ async def cmd_battle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args or not context.args[0].startswith("@"):
-        await update.message.reply_text("Usage: /challenge @username")
-        return
-    
-    challenger = update.effective_user
-    opponent_username = context.args[0].lstrip("@").strip()
-    
-    if challenger.username and challenger.username.lower() == opponent_username.lower():
-        await update.message.reply_text("❌ You can't challenge yourself!")
-        return
-    
-    pending_challenges[challenger.id] = opponent_username
-    log.info("Challenge: @%s -> @%s", challenger.username, opponent_username)
-    
-    await update.message.reply_text(
-        f"⚔️ @{challenger.username} has challenged @{opponent_username}!\n\n"
-        "📤 Both players: upload your battle card image in this chat.\n"
-        "Uploads can be in any order."
-    )
-
-async def cmd_mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if user_id not in uploaded_cards:
-        await update.message.reply_text(
-            "❌ You haven't uploaded a card yet.\n"
-            "Upload your PFP battle card to see your stats!"
-        )
-        return
-    
-    card = uploaded_cards[user_id]
-    hp = calculate_hp(card)
-    
-    stats_text = (
-        f"📊 Your Card Stats:\n\n"
-        f"⚡ Power: {card['power']}\n"
-        f"🛡️ Defense: {card['defense']}\n"
-        f"✨ Rarity: {card['rarity']}\n"
-        f"🎫 Serial: #{card['serial']}\n"
-        f"❤️ HP: {hp}\n\n"
-        f"Ready to battle!"
-    )
-    
-    await update.message.reply_text(stats_text)
-
-async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    username = (user.username or f"user{user.id}").lower()
-    user_id = user.id
-
-    try:
-        # Get file bytes
-        file_obj = None
-        if update.message.photo:
-            file_obj = await update.message.photo[-1].get_file()
-        elif update.message.document:
-            mime = update.message.document.mime_type or ""
-            if not mime.startswith("image/"):
-                await update.message.reply_text(
-                    "⚠️ Please upload an image file (PNG, JPG, etc)."
-                )
-                return
-            file_obj = await update.message.document.get_file()
-        else:
-            await update.message.reply_text("Please upload an image.")
-            return
-
-        file_bytes = await file_obj.download_as_bytearray()
-
-        if len(file_bytes) == 0:
-            await update.message.reply_text("⚠️ Empty file received. Try again.")
-            return
-
-        # Save image
-        os.makedirs("cards", exist_ok=True)
-        save_path = f"cards/{username}.png"
-        with open(save_path, "wb") as f:
-            f.write(file_bytes)
-
-        processing_msg = await update.message.reply_text(
-            "🤖 Analyzing your card with AI..."
-        )
-
-        # AWAIT the async Claude call
-        parsed = await analyze_card_with_claude(bytes(file_bytes))
-
-        card = {
-            "username": username,
-            "user_id": user_id,
-            "path": save_path,
-            "power": int(parsed["power"]),
-            "defense": int(parsed["defense"]),
-            "rarity": parsed["rarity"],
-            "serial": int(parsed["serial"]),
-        }
-
-        uploaded_cards[user_id] = card
-        hp = calculate_hp(card)
-
-        await processing_msg.edit_text(
-            f"✅ @{username}'s card analyzed!\n"
-            f"⚡ Power: {card['power']} | 🛡️ Defense: {card['defense']}\n"
-            f"✨ {card['rarity']} | 🎫 Serial #{card['serial']}\n"
-            f"❤️ HP: {hp}"
-        )
-    
-        # Check for battle trigger
-        triggered_pair = None
-
-        if user_id in pending_challenges:
-            opp_uname = pending_challenges[user_id].lower()
-            opponent_id = next(
-                (uid for uid, c in uploaded_cards.items()
-                 if c["username"].lower() == opp_uname),
-                None,
-            )
-            if opponent_id:
-                triggered_pair = (user_id, opponent_id)
-
-        if not triggered_pair:
-            for challenger_id, opp_uname in pending_challenges.items():
-                if username == opp_uname.lower():
-                    if challenger_id in uploaded_cards:
-                        triggered_pair = (challenger_id, user_id)
-                        break
-
-        # Run battle if both ready
-        if triggered_pair:
-            challenger_id, opponent_id = triggered_pair
-            card1 = uploaded_cards.get(challenger_id)
-            card2 = uploaded_cards.get(opponent_id)
-
-            if not card1 or not card2:
-                log.warning("Missing card data for battle")
-                return
-
-            hp1_start = calculate_hp(card1)
-            hp2_start = calculate_hp(card2)
-
-            hp1_end, hp2_end, battle_log = simulate_battle(
-                hp1_start, hp2_start, card1["power"], card2["power"]
-            )
-
-            if hp1_end > hp2_end:
-                winner = card1["username"]
-            elif hp2_end > hp1_end:
-                winner = card2["username"]
-            else:
-                winner = None
-
-            battle_id = str(uuid.uuid4())
-            battle_context = {
-                "card1_name": card1["username"],
-                "card2_name": card2["username"],
-                "card1_stats": {
-                    "power": card1["power"],
-                    "defense": card1["defense"],
-                    "rarity": card1["rarity"],
-                    "serial": card1["serial"]
-                },
-                "card2_stats": {
-                    "power": card2["power"],
-                    "defense": card2["defense"],
-                    "rarity": card2["rarity"],
-                    "serial": card2["serial"]
-                },
-                "hp1_start": hp1_start,
-                "hp2_start": hp2_start,
-                "hp1_end": hp1_end,
-                "hp2_end": hp2_end,
-                "winner_name": winner or "Tie",
-                "battle_id": battle_id,
-                "battle_log": battle_log
-            }
-
-            html_path = save_battle_html(battle_id, battle_context)
-
-            persist_battle_record(
-                battle_id,
-                card1["username"],
-                battle_context["card1_stats"],
-                card2["username"],
-                battle_context["card2_stats"],
-                winner,
-                html_path,
-            )
-
-            replay_url = f"{RENDER_EXTERNAL_URL}/battle/{battle_id}"
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎬 View Battle Replay", url=replay_url)]
-            ])
-
-            summary_text = f"⚔️ Battle Complete!\n\n"
-            if winner:
-                summary_text += f"🏆 Winner: @{winner}!\n\n"
-            else:
-                summary_text += "🤝 It's a Tie!\n\n"
-            summary_text += (
-                f"@{card1['username']}: {hp1_end}/{hp1_start} HP\n"
-                f"@{card2['username']}: {hp2_end}/{hp2_start} HP\n\n"
-                f"Battle lasted {len(battle_log)} rounds!"
-            )
-
-            await update.message.reply_text(summary_text, reply_markup=keyboard)
-
-            uploaded_cards.pop(challenger_id, None)
-            uploaded_cards.pop(opponent_id, None)
-            pending_challenges.pop(challenger_id, None)
-
-        else:
-            waiting_for = None
-            if user_id in pending_challenges:
-                waiting_for = f"@{pending_challenges[user_id]}"
-            else:
-                for challenger_id, opp_uname in pending_challenges.items():
-                    if username == opp_uname.lower():
-                        challenger_card = uploaded_cards.get(challenger_id)
-                        if challenger_card:
-                            waiting_for = f"@{challenger_card['username']}"
-                        else:
-                            waiting_for = "your challenger"
-                        break
-
-            if waiting_for:
-                await update.message.reply_text(
-                    f"⏳ Card ready! Waiting for {waiting_for} to upload theirs..."
-                )
-            else:
-                await update.message.reply_text(
-                    "✅ Card uploaded! Use /challenge @username to start a battle."
-                )
-
-    except Exception as e:
-        log.exception(f"Error in card upload handler: {e}")
-        try:
-            await update.message.reply_text(
-                "❌ Something went wrong processing your card. Please try again."
-            )
-        except Exception:
-            pass
-
-# ---------- FastAPI routes ----------
-@app.get("/")
-async def root():
-    return {"status": "ok", "service": "PFP Battle Bot", "ocr": "Claude Vision API"}
-
-@app.get("/battle/{battle_id}", response_class=HTMLResponse)
-async def battle_page(request: Request, battle_id: str):
-    battle_file = f"battles/{battle_id}.html"
-    if os.path.exists(battle_file):
-        return FileResponse(battle_file, media_type="text/html")
-    
-    return HTMLResponse(content="""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Battle Not Found</title>
-            <style>
-                body {
-                    background-color: #0d0d0d;
-                    color: white;
-                    text-align: center;
-                    font-family: Arial, sans-serif;
-                    padding: 50px;
-                }
-                h1 { color: #ff6b6b; }
-            </style>
-        </head>
-        <body>
-            <h1>⚔️ Battle Not Found</h1>
-            <p>This battle doesn't exist or hasn't been completed yet.</p>
-        </body>
-        </html>
-    """, status_code=404)
-
-@app.post(WEBHOOK_PATH)
-async def webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return JSONResponse({"ok": True})
-
-# ---------- Startup / Shutdown ----------
-telegram_app: Optional[Application] = None
-
-@app.on_event("startup")
-async def on_startup():
-    global telegram_app
-    log.info("Starting Telegram Application with Claude Vision...")
-    
-    telegram_app = Application.builder().token(BOT_TOKEN).build()
-    
-    telegram_app.add_handler(CommandHandler("battle", cmd_battle))
-    telegram_app.add_handler(CommandHandler("start", cmd_battle))
-    telegram_app.add_handler(CommandHandler("challenge", cmd_challenge))
-    telegram_app.add_handler(CommandHandler("mystats", cmd_mystats))
-    telegram_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handler_card_upload))
-    
-    await telegram_app.initialize()
-    await telegram_app.bot.delete_webhook(drop_pending_updates=True)
-    await telegram_app.bot.set_webhook(WEBHOOK_URL)
-    log.info("Webhook set to %s", WEBHOOK_URL)
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    if telegram_app:
-        try:
-            await telegram_app.bot.delete_webhook()
-        except Exception:
-            pass
-        await telegram_app.shutdown()
-    log.info("Bot stopped cleanly.")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=PORT, reload=False)
+    if not context.args or not context.args[0].st
