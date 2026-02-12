@@ -819,7 +819,7 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "✅ Card uploaded! Use /challenge @username to start a battle."
             )
 
- except Exception as e:  # <-- THIS catches anything that slipped through
+    except Exception as e:  # <-- THIS catches anything that slipped through
         log.exception(f"Error in card upload handler: {e}")
         try:
             await update.message.reply_text(
