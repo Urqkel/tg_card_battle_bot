@@ -694,132 +694,133 @@ async def handler_card_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"❤️ HP: {hp}"
         )
     
-    # Check for battle trigger
-    triggered_pair = None
-    
-    if user_id in pending_challenges:
-        opponent_username = pending_challenges[user_id].lower()
-        opponent_id = next(
-            (uid for uid, c in uploaded_cards.items() if c["username"].lower() == opponent_username),
-            None,
-        )
-        if opponent_id:
-            triggered_pair = (user_id, opponent_id)
-    
-    if not triggered_pair:
-        for challenger_id, opponent_username in pending_challenges.items():
-            if username == opponent_username.lower():
-                if challenger_id in uploaded_cards:
-                    triggered_pair = (challenger_id, user_id)
-                    break
-    
-    # Run battle if both ready
-    if triggered_pair:
-        challenger_id, opponent_id = triggered_pair
-        card1 = uploaded_cards.get(challenger_id)
-        card2 = uploaded_cards.get(opponent_id)
-        
-        if not card1 or not card2:
-            log.warning("Missing card data for battle")
-            return
-        
-        hp1_start = calculate_hp(card1)
-        hp2_start = calculate_hp(card2)
-        
-        hp1_end, hp2_end, battle_log = simulate_battle(
-            hp1_start, hp2_start, card1["power"], card2["power"]
-        )
-        
-        if hp1_end > hp2_end:
-            winner = card1["username"]
-        elif hp2_end > hp1_end:
-            winner = card2["username"]
-        else:
-            winner = None
-        
-        battle_id = str(uuid.uuid4())
-        battle_context = {
-            "card1_name": card1["username"],
-            "card2_name": card2["username"],
-            "card1_stats": {
-                "power": card1["power"],
-                "defense": card1["defense"],
-                "rarity": card1["rarity"],
-                "serial": card1["serial"]
-            },
-            "card2_stats": {
-                "power": card2["power"],
-                "defense": card2["defense"],
-                "rarity": card2["rarity"],
-                "serial": card2["serial"]
-            },
-            "hp1_start": hp1_start,
-            "hp2_start": hp2_start,
-            "hp1_end": hp1_end,
-            "hp2_end": hp2_end,
-            "winner_name": winner or "Tie",
-            "battle_id": battle_id,
-            "battle_log": battle_log
-        }
-        
-        html_path = save_battle_html(battle_id, battle_context)
-        
-        persist_battle_record(
-            battle_id,
-            card1["username"],
-            battle_context["card1_stats"],
-            card2["username"],
-            battle_context["card2_stats"],
-            winner,
-            html_path,
-        )
-        
-        replay_url = f"{RENDER_EXTERNAL_URL}/battle/{battle_id}"
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎬 View Battle Replay", url=replay_url)]
-        ])
-        
-        summary_text = f"⚔️ Battle Complete!\n\n"
-        if winner:
-            summary_text += f"🏆 Winner: @{winner}!\n\n"
-        else:
-            summary_text += "🤝 It's a Tie!\n\n"
-        summary_text += (
-            f"@{card1['username']}: {hp1_end}/{hp1_start} HP\n"
-            f"@{card2['username']}: {hp2_end}/{hp2_start} HP\n\n"
-            f"Battle lasted {len(battle_log)} rounds!"
-        )
-        
-        await update.message.reply_text(summary_text, reply_markup=keyboard)
-        
-        uploaded_cards.pop(challenger_id, None)
-        uploaded_cards.pop(opponent_id, None)
-        pending_challenges.pop(challenger_id, None)
-    
-    else:
-        waiting_for = None
+        # Check for battle trigger
+        triggered_pair = None
+
         if user_id in pending_challenges:
-            waiting_for = f"@{pending_challenges[user_id]}"
-        else:
-            for challenger_id, opponent_username in pending_challenges.items():
-                if username == opponent_username.lower():
-                    challenger_card = uploaded_cards.get(challenger_id)
-                    if challenger_card:
-                        waiting_for = f"@{challenger_card['username']}"
-                    else:
-                        waiting_for = "your challenger"
-                    break
-        
-        if waiting_for:
-            await update.message.reply_text(
-                f"⏳ Card ready! Waiting for {waiting_for} to upload theirs..."
+            opp_uname = pending_challenges[user_id].lower()
+            opponent_id = next(
+                (uid for uid, c in uploaded_cards.items()
+                 if c["username"].lower() == opp_uname),
+                None,
             )
-        else:
-            await update.message.reply_text(
-                "✅ Card uploaded! Use /challenge @username to start a battle."
+            if opponent_id:
+                triggered_pair = (user_id, opponent_id)
+
+        if not triggered_pair:
+            for challenger_id, opp_uname in pending_challenges.items():
+                if username == opp_uname.lower():
+                    if challenger_id in uploaded_cards:
+                        triggered_pair = (challenger_id, user_id)
+                        break
+
+        # Run battle if both ready
+        if triggered_pair:
+            challenger_id, opponent_id = triggered_pair
+            card1 = uploaded_cards.get(challenger_id)
+            card2 = uploaded_cards.get(opponent_id)
+
+            if not card1 or not card2:
+                log.warning("Missing card data for battle")
+                return
+
+            hp1_start = calculate_hp(card1)
+            hp2_start = calculate_hp(card2)
+
+            hp1_end, hp2_end, battle_log = simulate_battle(
+                hp1_start, hp2_start, card1["power"], card2["power"]
             )
 
-    except Exception as e:  # <-- THIS catches anything that slipped through
+            if hp1_end > hp2_end:
+                winner = card1["username"]
+            elif hp2_end > hp1_end:
+                winner = card2["username"]
+            else:
+                winner = None
+
+            battle_id = str(uuid.uuid4())
+            battle_context = {
+                "card1_name": card1["username"],
+                "card2_name": card2["username"],
+                "card1_stats": {
+                    "power": card1["power"],
+                    "defense": card1["defense"],
+                    "rarity": card1["rarity"],
+                    "serial": card1["serial"]
+                },
+                "card2_stats": {
+                    "power": card2["power"],
+                    "defense": card2["defense"],
+                    "rarity": card2["rarity"],
+                    "serial": card2["serial"]
+                },
+                "hp1_start": hp1_start,
+                "hp2_start": hp2_start,
+                "hp1_end": hp1_end,
+                "hp2_end": hp2_end,
+                "winner_name": winner or "Tie",
+                "battle_id": battle_id,
+                "battle_log": battle_log
+            }
+
+            html_path = save_battle_html(battle_id, battle_context)
+
+            persist_battle_record(
+                battle_id,
+                card1["username"],
+                battle_context["card1_stats"],
+                card2["username"],
+                battle_context["card2_stats"],
+                winner,
+                html_path,
+            )
+
+            replay_url = f"{RENDER_EXTERNAL_URL}/battle/{battle_id}"
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎬 View Battle Replay", url=replay_url)]
+            ])
+
+            summary_text = f"⚔️ Battle Complete!\n\n"
+            if winner:
+                summary_text += f"🏆 Winner: @{winner}!\n\n"
+            else:
+                summary_text += "🤝 It's a Tie!\n\n"
+            summary_text += (
+                f"@{card1['username']}: {hp1_end}/{hp1_start} HP\n"
+                f"@{card2['username']}: {hp2_end}/{hp2_start} HP\n\n"
+                f"Battle lasted {len(battle_log)} rounds!"
+            )
+
+            await update.message.reply_text(summary_text, reply_markup=keyboard)
+
+            uploaded_cards.pop(challenger_id, None)
+            uploaded_cards.pop(opponent_id, None)
+            pending_challenges.pop(challenger_id, None)
+
+        else:
+            waiting_for = None
+            if user_id in pending_challenges:
+                waiting_for = f"@{pending_challenges[user_id]}"
+            else:
+                for challenger_id, opp_uname in pending_challenges.items():
+                    if username == opp_uname.lower():
+                        challenger_card = uploaded_cards.get(challenger_id)
+                        if challenger_card:
+                            waiting_for = f"@{challenger_card['username']}"
+                        else:
+                            waiting_for = "your challenger"
+                        break
+
+            if waiting_for:
+                await update.message.reply_text(
+                    f"⏳ Card ready! Waiting for {waiting_for} to upload theirs..."
+                )
+            else:
+                await update.message.reply_text(
+                    "✅ Card uploaded! Use /challenge @username to start a battle."
+                )
+
+    except Exception as e:
         log.exception(f"Error in card upload handler: {e}")
         try:
             await update.message.reply_text(
